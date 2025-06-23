@@ -1,0 +1,17 @@
+## Custom Git ignore
+
+# IDE folder
+/.idea
+
+# Compiled library files
+*.so
+
+# Custom folders
+/data
+/results
+
+# Custom file extension
+# *.sl
+*.out
+*.json
+
