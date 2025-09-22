@@ -59,7 +59,7 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
             regul_delta=1.0,
             kappa_weights='quadratic',
             focal_gamma=2.0,
-            ordin_decomp_weight='balanced',
+            obd_weight='balanced',
             class_counts=None,
             class_priors=None,
             class_weight='balanced',
@@ -102,7 +102,7 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
         self.regul_delta = regul_delta
         self.kappa_weights = kappa_weights
         self.focal_gamma = focal_gamma
-        self.ordin_decomp_weight = ordin_decomp_weight
+        self.obd_weight = obd_weight
         self.class_counts = class_counts
         self.class_priors = class_priors
         self.class_weight = class_weight
@@ -367,7 +367,7 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
         'regul_delta': [Interval(Real, 0.0, None, closed='neither'), None],
         'kappa_weights': [StrOptions({'nominal', 'linear', 'quadratic'}), 'array-like'],
         'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
-        'ordin_decomp_weight': [StrOptions({'balanced'}), dict, None],
+        'obd_weight': [StrOptions({'balanced'}), dict, None],
         'class_counts': ['array-like', None],
         'class_priors': ['array-like', None],
         'class_weight': [StrOptions({'balanced'}), 'array-like', None],
@@ -401,7 +401,7 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             regul_eta=0.0,
             regul_delta=1.0,
             kappa_weights='quadratic',
-            ordin_decomp_weight='balanced',
+            obd_weight='balanced',
             focal_gamma=2.0,
             class_counts=None,
             class_priors=None,
@@ -443,7 +443,7 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             regul_delta=regul_delta,
             kappa_weights=kappa_weights,
             focal_gamma=focal_gamma,
-            ordin_decomp_weight=ordin_decomp_weight,
+            obd_weight=obd_weight,
             class_counts=class_counts,
             class_priors=class_priors,
             class_weight=class_weight,
@@ -624,13 +624,13 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
         elif self.loss == 'obd_cross_entropy':
             loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
                                            from_logits=self.to_logits,
-                                           ordin_decomp_weight=self.ordin_decomp_weight,
+                                           obd_weight=self.obd_weight,
                                            class_counts=self.class_counts_,
                                            class_weight=self.class_weight_)
         elif self.loss == 'obd_focal':
             loss_ = obd_focal_loss(n_classes=self.n_classes,
                                    from_logits=self.to_logits,
-                                   ordin_decomp_weight=self.ordin_decomp_weight,
+                                   obd_weight=self.obd_weight,
                                    class_counts=self.class_counts_,
                                    focal_gamma=self.focal_gamma,
                                    class_weight=self.class_weight_)
@@ -656,7 +656,7 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
         'regul_delta': [Interval(Real, 0.0, None, closed='neither'), None],
         'kappa_weights': [StrOptions({'nominal', 'linear', 'quadratic'}), 'array-like'],
         'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
-        'ordin_decomp_weight': [StrOptions({'balanced'}), dict, None],
+        'obd_weight': [StrOptions({'balanced'}), dict, None],
         'class_counts': ['array-like', None],
         'class_priors': ['array-like', None],
         'class_weight': [StrOptions({'balanced'}), 'array-like', None],
@@ -691,7 +691,7 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             regul_delta=1.0,
             kappa_weights='quadratic',
             focal_gamma=2.0,
-            ordin_decomp_weight='balanced',
+            obd_weight='balanced',
             class_counts=None,
             class_priors=None,
             class_weight='balanced',
@@ -731,7 +731,7 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             regul_delta=regul_delta,
             kappa_weights=kappa_weights,
             focal_gamma=focal_gamma,
-            ordin_decomp_weight=ordin_decomp_weight,
+            obd_weight=obd_weight,
             class_counts=class_counts,
             class_priors=class_priors,
             class_weight=class_weight,
@@ -912,13 +912,13 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
         elif self.loss == 'obd_cross_entropy':
             loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
                                            from_logits=self.to_logits,
-                                           ordin_decomp_weight=self.ordin_decomp_weight,
+                                           obd_weight=self.obd_weight,
                                            class_counts=self.class_counts_,
                                            class_weight=self.class_weight_)
         elif self.loss == 'obd_focal':
             loss_ = obd_focal_loss(n_classes=self.n_classes,
                                    from_logits=self.to_logits,
-                                   ordin_decomp_weight=self.ordin_decomp_weight,
+                                   obd_weight=self.obd_weight,
                                    class_counts=self.class_counts_,
                                    focal_gamma=self.focal_gamma,
                                    class_weight=self.class_weight_)

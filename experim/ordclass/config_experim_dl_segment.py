@@ -119,7 +119,7 @@ experim = {
     'hyperparams': HYPERPARAMS_COMMON + [
         {'name': 'out_type', 'fixed': True, 'value': 'nominal'},
         {'name': 'loss', 'fixed': True, 'value': 'obd_cross_entropy'},
-        {'name': 'ordin_decomp_weight', 'fixed': True, 'value': 'balanced'}
+        {'name': 'obd_weight', 'fixed': True, 'value': 'balanced'}
     ]
 }
 EXPERIMENTS.append(experim)  # ID: 08
@@ -129,7 +129,7 @@ experim = {
         {'name': 'out_type', 'fixed': True, 'value': 'nominal'},
         {'name': 'loss', 'fixed': True, 'value': 'obd_focal'},
         {'name': 'focal_gamma', 'fixed': True, 'value': 2.0},
-        {'name': 'ordin_decomp_weight', 'fixed': True, 'value': 'balanced'}
+        {'name': 'obd_weight', 'fixed': True, 'value': 'balanced'}
     ]
 }
 EXPERIMENTS.append(experim)  # ID: 09

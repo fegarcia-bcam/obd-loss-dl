@@ -170,7 +170,7 @@ def _get_unimodal_regul_beta(n_classes, delta=_DEFAULT_DELTA):
                  prefer_skip_nested_validation=True)
 def owk_loss(n_classes, from_logits, weights, class_priors, class_weight=None):
     # obtain kappa weights matrix
-    w = _ordinal_kappa_weights(weights=weights, n_classes=n_classes)
+    w = _get_owk_weights(weights=weights, n_classes=n_classes)
 
     # obtain class weights
     if isinstance(class_weight, str) and (class_weight == 'balanced'):
@@ -230,7 +230,7 @@ def owk_loss(n_classes, from_logits, weights, class_priors, class_weight=None):
 @validate_params({'weights': [StrOptions({'nominal', 'linear', 'quadratic'}), 'array-like'],
                   'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')]},
                  prefer_skip_nested_validation=True)
-def _ordinal_kappa_weights(weights, n_classes):
+def _get_owk_weights(weights, n_classes):
     # weights matrix
     w = np.zeros(shape=(n_classes, n_classes), dtype=np.float32)
     if weights == 'nominal':
@@ -272,13 +272,13 @@ DECOMP_ALL = [DECOMP_NOM] + DECOMP_ORD
 
 @validate_params({'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')],
                   'from_logits': ['boolean'],
-                  'ordin_decomp_weight': [StrOptions({'balanced'}), dict],
+                  'obd_weight': [StrOptions({'balanced'}), dict],
                   'class_counts': ['array-like'],
                   'class_weight': [StrOptions({'balanced'}), 'array-like', None]},
                  prefer_skip_nested_validation=True)
-def obd_cross_entropy_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, class_weight=None):
+def obd_cross_entropy_loss(n_classes, from_logits, obd_weight, class_counts, class_weight=None):
     # verify decomposition weights
-    ordin_decomp_weight = _verify_decomposition_weights(ordin_decomp_weight)
+    obd_weight = _verify_obd_weights(obd_weight)
 
     # obtain class weights
     if isinstance(class_weight, str) and (class_weight == 'balanced'):
@@ -294,10 +294,10 @@ def obd_cross_entropy_loss(n_classes, from_logits, ordin_decomp_weight, class_co
         raise ValueError
 
     # compute overall contributions to loss from decomposition weights and differential entropies
-    diff_entropy_decomp = _get_diff_entropy_from_class_counts(class_counts)
+    diff_entropy_decomp = _get_diff_entropy(class_counts)
     ordin_contrib_weight = dict()
     for dec_ in DECOMP_ALL:
-        ordin_contrib_weight[dec_] = ordin_decomp_weight[dec_] * diff_entropy_decomp[dec_]
+        ordin_contrib_weight[dec_] = obd_weight[dec_] * diff_entropy_decomp[dec_]
 
     # convert types for TensorFlow
     class_weight = tf.convert_to_tensor(class_weight, dtype=np.float32)
@@ -418,14 +418,14 @@ def obd_cross_entropy_loss(n_classes, from_logits, ordin_decomp_weight, class_co
 
 @validate_params({'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')],
                   'from_logits': ['boolean'],
-                  'ordin_decomp_weight': [StrOptions({'balanced'}), dict],
+                  'obd_weight': [StrOptions({'balanced'}), dict],
                   'class_counts': ['array-like'],
                   'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
                   'class_weight': [StrOptions({'balanced'}), 'array-like', None]},
                  prefer_skip_nested_validation=True)
-def obd_focal_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, focal_gamma=2.0, class_weight=None):
+def obd_focal_loss(n_classes, from_logits, obd_weight, class_counts, focal_gamma=2.0, class_weight=None):
     # verify decomposition weights
-    ordin_decomp_weight = _verify_decomposition_weights(ordin_decomp_weight)
+    obd_weight = _verify_obd_weights(obd_weight)
 
     # obtain class weights
     if isinstance(class_weight, str) and (class_weight == 'balanced'):
@@ -441,10 +441,10 @@ def obd_focal_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, fo
         raise ValueError
 
     # compute overall contributions to loss from decomposition weights and differential entropies
-    diff_entropy_decomp = _get_diff_entropy_from_class_counts(class_counts)
+    diff_entropy_decomp = _get_diff_entropy(class_counts)
     ordin_contrib_weight = dict()
     for dec_ in DECOMP_ALL:
-        ordin_contrib_weight[dec_] = ordin_decomp_weight[dec_] * diff_entropy_decomp[dec_]
+        ordin_contrib_weight[dec_] = obd_weight[dec_] * diff_entropy_decomp[dec_]
 
     # convert types for TensorFlow
     class_weight = tf.convert_to_tensor(class_weight, dtype=np.float32)
@@ -590,38 +590,38 @@ def obd_focal_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, fo
     return loss_fn
 
 
-def _verify_decomposition_weights(ordin_decomp_weight):
+def _verify_obd_weights(obd_weight):
     _DEFAULT_WEIGHT = 1.0
     _MINIMUM_WEIGHT = 0.0
 
     # verify the weights of the different decomposition strategies towards the overall loss
-    if isinstance(ordin_decomp_weight, str) and (ordin_decomp_weight == 'balanced'):
-        ordin_decomp_weight = dict()
+    if isinstance(obd_weight, str) and (obd_weight == 'balanced'):
+        obd_weight = dict()
 
         n_decomp_ord = len(DECOMP_ORD)
         for dec_ in DECOMP_ALL:
             if dec_ == DECOMP_NOM:
-                ordin_decomp_weight[dec_] = _DEFAULT_WEIGHT
+                obd_weight[dec_] = _DEFAULT_WEIGHT
             else:
-                ordin_decomp_weight[dec_] = _DEFAULT_WEIGHT / n_decomp_ord
+                obd_weight[dec_] = _DEFAULT_WEIGHT / n_decomp_ord
 
-    elif isinstance(ordin_decomp_weight, dict):
-        if not set(ordin_decomp_weight.keys()).issubset(set(DECOMP_ALL)):
+    elif isinstance(obd_weight, dict):
+        if not set(obd_weight.keys()).issubset(set(DECOMP_ALL)):
             raise ValueError
         for dec_ in DECOMP_ALL:
-            if dec_ in ordin_decomp_weight:
-                if ordin_decomp_weight[dec_] < _MINIMUM_WEIGHT:
+            if dec_ in obd_weight:
+                if obd_weight[dec_] < _MINIMUM_WEIGHT:
                     raise ValueError
             else:
-                ordin_decomp_weight[dec_] = _DEFAULT_WEIGHT
+                obd_weight[dec_] = _DEFAULT_WEIGHT
 
     else:
         raise ValueError
 
-    return ordin_decomp_weight
+    return obd_weight
 
 
-def _get_diff_entropy_from_class_counts(class_counts):
+def _get_diff_entropy(class_counts):
 
     def h_dirichlet_fn(alpha):
         alpha_dim = alpha.size
