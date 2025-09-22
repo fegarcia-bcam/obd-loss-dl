@@ -12,22 +12,21 @@ from tensorflow.keras.utils import img_to_array, array_to_img
 from tensorflow.experimental.numpy import shape as np_shape
 
 
-_N_CHANNELS_BW = 1  # luminance, grayscale
-_N_CHANNELS_COL = 3  # color coding, e.g. RGB
+_N_DIMS_BASE_2D = 2  # height, width
 
-_N_DIMS_FLAT_2D = 2  # height, width
-
-_N_DIMS_IMAGE_2D = 3  # height, width, channels
+_N_DIMS_MAIN_2D = 3  # height, width, channels
 
 _N_DIMS_BATCH_2D = 4  # batch, height, width, channels
 
-_N_CHANNELS_LABEL_IDX = 1
+_AX_FIRST = 1  # ignores batch dim 0
+_AX_LAST = -1
 
 _N_DIMS_BATCH = 1  # batch
-_N_DIMS_LABELS = 2  # batch, numeric or one-hot encoded label
+_N_DIMS_LABELS_ORD = 1  # batch, numerical labels
+_N_DIMS_LABELS_OHE = 2  # batch, one-hot encoded labels
 
-_AX_FIRST = 1
-_AX_LAST = -1
+_N_CHANNELS_BW = 1  # grayscale
+_N_CHANNELS_COL = 3  # color (e.g. RGB)
 
 
 class AugmentImage2D(Layer):
@@ -120,14 +119,14 @@ class AugmentImage2D(Layer):
             n_dims_input = len(np_shape(inputs))
 
             # check shape consistency
-            if n_dims_input not in [_N_DIMS_IMAGE_2D, _N_DIMS_BATCH_2D]:
+            if n_dims_input not in [_N_DIMS_MAIN_2D, _N_DIMS_BATCH_2D]:
                 raise ValueError
 
             is_batched = (n_dims_input == _N_DIMS_BATCH_2D)
             if not is_batched:
                 inputs = tf.expand_dims(inputs, axis=0)
 
-            # move inputs channels to the last position
+            # move input channels to the last position
             perm_axes = list(range(_N_DIMS_BATCH_2D))
             if self.data_format == 'channels_first':
                 perm_axes[_AX_FIRST], perm_axes[_AX_LAST] = perm_axes[_AX_LAST], perm_axes[_AX_FIRST]
@@ -136,76 +135,73 @@ class AugmentImage2D(Layer):
             # guarantee order and consistency in the labels' shape
             n_dims_lbl_in = len(np_shape(labels_in))
 
-            labels_num = (n_dims_lbl_in in [_N_DIMS_BATCH, _N_DIMS_LABELS])
-            labels_num_flat = (n_dims_lbl_in == _N_DIMS_BATCH)
-            labels_mask = (n_dims_lbl_in in [_N_DIMS_IMAGE_2D, _N_DIMS_BATCH_2D])
-            labels_mask_flat = (n_dims_lbl_in == _N_DIMS_IMAGE_2D)
+            labels_classif_ord = (n_dims_lbl_in == _N_DIMS_LABELS_ORD)
+            labels_classif_ohe = (n_dims_lbl_in == _N_DIMS_LABELS_OHE)
+            labels_classif = (labels_classif_ord or labels_classif_ohe)
+            labels_segment_ord = (n_dims_lbl_in == _N_DIMS_MAIN_2D)
+            labels_segment_ohe = (n_dims_lbl_in == _N_DIMS_BATCH_2D)
+            labels_segment = (labels_segment_ord or labels_segment_ohe)
 
-            if not (labels_num or labels_mask):
+            if not (labels_classif or labels_segment):
                 raise ValueError
 
-            if labels_num_flat:
-                labels_in = tf.expand_dims(labels_in, axis=_AX_LAST)
-
-            if labels_mask:
-                # move labels channels to the last position
+            if labels_classif:
+                if labels_classif_ord:
+                    labels_in = tf.expand_dims(labels_in, axis=_AX_LAST)
+            else:
+                # move label channels to the last position
                 if self.data_format == 'channels_first':
-                    if labels_mask_flat:
+                    if labels_segment_ord:
                         labels_in = tf.expand_dims(labels_in, axis=_AX_FIRST)
                     labels_in = tf.transpose(labels_in, perm=perm_axes)
                 else:
-                    if labels_mask_flat:
+                    if labels_segment_ord:
                         labels_in = tf.expand_dims(labels_in, axis=_AX_LAST)
             
-            if labels_mask:
-                input_shape = np.asarray(np_shape(inputs))
-                labels_in_shape = np.asarray(np_shape(labels_in))
+            input_shape = np.asarray(np_shape(inputs))
+            labels_in_shape = np.asarray(np_shape(labels_in))
+            if labels_segment:
+                if input_shape.size != labels_in_shape.size:
+                    raise ValueError
                 if np.any(input_shape[_AX_FIRST:_AX_LAST] != labels_in_shape[_AX_FIRST:_AX_LAST]):
                     raise ValueError
 
-                n_classes = labels_in_shape[_AX_LAST]
-                labels_ohe = (n_classes > _N_CHANNELS_LABEL_IDX)
-
-            else:
-                labels_in_shape = np.asarray(np_shape(labels_in))
-
-                n_classes = labels_in_shape[_AX_LAST]
-                labels_ohe = (n_classes > _N_CHANNELS_LABEL_IDX)
+            n_classes = labels_in_shape[_AX_LAST]
 
             # augment
-            if not labels_mask:
+            if labels_classif:
                 labels_augm = tf.experimental.numpy.full_like(inputs, fill_value=np.nan, dtype=tf.float32)
                 labels_augm = tf.math.reduce_sum(labels_augm, axis=_AX_LAST, keepdims=True)
 
             else:
                 labels_augm = labels_in
                 # transform one-hot to numeric
-                if labels_ohe:
+                if labels_segment_ohe:
                     labels_augm = tf.math.argmax(labels_augm, axis=_AX_LAST)
                     labels_augm = tf.expand_dims(labels_augm, axis=_AX_LAST)
                     labels_augm = tf.cast(labels_augm, dtype=tf.float32)
 
             outputs, labels_out = self._random_augment_2d(inputs, labels_augm)
 
-            if not labels_mask:
+            if labels_classif:
                 labels_out = labels_in
+            else:
+                if labels_segment_ohe:
+                    l_classes = tf.constant(np.arange(n_classes), dtype=tf.float32)
 
-            if labels_mask and labels_ohe:
-                l_classes = tf.constant(np.arange(n_classes), dtype=tf.float32)
-
-                labels_out = tf.expand_dims(labels_out, axis=_AX_LAST)
-                labels_out = tf.math.equal(labels_out[..., :], l_classes)  # one-hot encoding
-                labels_out = tf.cast(labels_out, dtype=tf.float32)
+                    labels_out = tf.expand_dims(labels_out, axis=_AX_LAST)
+                    labels_out = tf.math.equal(labels_out[..., :], l_classes)  # one-hot encoding
+                    labels_out = tf.cast(labels_out, dtype=tf.float32)
 
             # move channels again to its original position
             if self.data_format == 'channels_first':
                 outputs = tf.transpose(outputs, perm=perm_axes)
-                if labels_mask:
+                if labels_segment:
                     labels_out = tf.transpose(labels_out, perm=perm_axes)
-                    if labels_mask_flat:
+                    if labels_segment_ord:
                         labels_out = tf.squeeze(labels_in, axis=_AX_FIRST)
             else:
-                if labels_mask_flat:
+                if labels_segment_ord:
                     labels_out = tf.squeeze(labels_in, axis=_AX_LAST)
 
         else:
@@ -320,7 +316,7 @@ class AugmentImage2D(Layer):
                                                                           offset=mtx_offset,
                                                                           mode=fill_mode)
                     l_x_out.append(x_out_)
-                x_out = np.stack(l_x_out, axis=_N_DIMS_FLAT_2D)
+                x_out = np.stack(l_x_out, axis=_N_DIMS_BASE_2D)
 
             return x_out
 
@@ -349,7 +345,7 @@ class AugmentImage2D(Layer):
                     x_out_ = ImageEnhance.Sharpness(x_out_).enhance(factor_sharp)
                     x_out_ = img_to_array(x_out_, data_format='channels_last')
                     l_x_out.append(x_out_)
-                x_out = np.stack(l_x_out, axis=_N_DIMS_FLAT_2D)
+                x_out = np.stack(l_x_out, axis=_N_DIMS_BASE_2D)
 
             if not scale and local_scale:
                 x_out = x_out / 255.0 * (val_max - val_min) + val_min
@@ -375,7 +371,7 @@ class AugmentImage2D(Layer):
                     x_out_ = ImageEnhance.Brightness(x_out_).enhance(factor_bright)
                     x_out_ = img_to_array(x_out_, data_format='channels_last')
                     l_x_out.append(x_out_)
-                x_out = np.stack(l_x_out, axis=_N_DIMS_FLAT_2D)
+                x_out = np.stack(l_x_out, axis=_N_DIMS_BASE_2D)
 
             if not scale and local_scale:
                 x_out = x_out / 255.0 * (val_max - val_min) + val_min
@@ -401,7 +397,7 @@ class AugmentImage2D(Layer):
                     x_out_ = ImageEnhance.Contrast(x_out_).enhance(factor_contrast)
                     x_out_ = img_to_array(x_out_, data_format='channels_last')
                     l_x_out.append(x_out_)
-                x_out = np.stack(l_x_out, axis=_N_DIMS_FLAT_2D)
+                x_out = np.stack(l_x_out, axis=_N_DIMS_BASE_2D)
 
             if not scale and local_scale:
                 x_out = x_out / 255.0 * (val_max - val_min) + val_min
@@ -435,7 +431,7 @@ class AugmentImage2D(Layer):
             if self.displace_range > 0.0:
                 displace_shift = self.generator.uniform(low=-1.0 * self.displace_range,
                                                         high=+1.0 * self.displace_range,
-                                                        size=_N_DIMS_FLAT_2D)
+                                                        size=_N_DIMS_BASE_2D)
                 displace_h = displace_shift[0] * size_h
                 displace_w = displace_shift[1] * size_w
             else:
@@ -451,7 +447,7 @@ class AugmentImage2D(Layer):
             if self.shear_range > 0.0:
                 shear_shift = self.generator.uniform(low=-1.0 * self.shear_range,
                                                      high=+1.0 * self.shear_range,
-                                                     size=_N_DIMS_FLAT_2D)
+                                                     size=_N_DIMS_BASE_2D)
                 shear_hw, shear_wh = shear_shift
             else:
                 shear_hw, shear_wh = 0.0, 0.0

@@ -6,11 +6,13 @@ from tensorflow.keras.layers import Layer
 from tensorflow.experimental.numpy import shape as np_shape
 
 
-_N_DIMS_IMAGE_2D = 3  # height, width, channels
+_N_DIMS_BASE_2D = 2  # height, width
+
+_N_DIMS_MAIN_2D = 3  # height, width, channels
 
 _N_DIMS_BATCH_2D = 4  # batch, height, width, channels
 
-_AX_FIRST = 1
+_AX_FIRST = 1  # ignores batch dim 0
 _AX_LAST = -1
 
 
@@ -65,7 +67,7 @@ class Resize2D(Layer):
         n_dims_input = len(np_shape(inputs))
 
         # check shape consistency
-        if n_dims_input not in [_N_DIMS_IMAGE_2D, _N_DIMS_BATCH_2D]:
+        if n_dims_input not in [_N_DIMS_MAIN_2D, _N_DIMS_BATCH_2D]:
             raise ValueError
 
         is_batched = (n_dims_input == _N_DIMS_BATCH_2D)

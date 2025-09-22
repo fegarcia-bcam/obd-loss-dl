@@ -13,9 +13,10 @@ _MIN_CLASSES = 3
 _MAX_CLASSES = 2 ** 8
 
 _N_DIMS_BATCH = 1  # batch
-_N_DIMS_LABELS = 2  # batch, numeric or one-hot encoded label
+_N_DIMS_LABELS_ORD = 1  # batch, numerical labels
+_N_DIMS_LABELS_OHE = 2  # batch, one-hot encoded labels
 
-_AX_FIRST = 1
+_AX_FIRST = 1  # ignores batch dim 0
 _AX_LAST = -1
 
 
@@ -66,30 +67,32 @@ class OrdinalOneHotEncoder(Layer):
         # guarantee order and consistency in the labels' shape
         n_dims_lbl_in = len(np_shape(labels_in))
 
-        labels_num = (n_dims_lbl_in in [_N_DIMS_LABELS - _N_DIMS_BATCH, _N_DIMS_LABELS])
-        labels_num_flat = labels_num and (n_dims_lbl_in == _N_DIMS_LABELS - _N_DIMS_BATCH)
-        labels_mask = (not labels_num) and (n_dims_lbl_in in [n_dims_input - _N_DIMS_BATCH, n_dims_input])
-        labels_mask_flat = labels_mask and (n_dims_lbl_in == n_dims_input - _N_DIMS_BATCH)
+        labels_classif_ord = (n_dims_lbl_in == _N_DIMS_LABELS_ORD)
+        labels_classif_ohe = (n_dims_lbl_in == _N_DIMS_LABELS_OHE)
+        labels_classif = (labels_classif_ord or labels_classif_ohe)
+        labels_segment_ord = (not labels_classif) and (n_dims_lbl_in == n_dims_input - _N_DIMS_BATCH)
+        labels_segment_ohe = (not labels_classif) and (n_dims_lbl_in == n_dims_input)
+        labels_segment = (labels_segment_ord or labels_segment_ohe)
 
-        if not (labels_num or labels_mask):
+        if not (labels_classif or labels_segment):
             raise ValueError
-        
-        if labels_num_flat:
-            labels_in = tf.expand_dims(labels_in, axis=_AX_LAST)
 
-        if labels_mask:
-            # move labels channels to the last position
+        if labels_classif:
+            if labels_classif_ord:
+                labels_in = tf.expand_dims(labels_in, axis=_AX_LAST)
+        else:
+            # move label channels to the last position
             if self.data_format == 'channels_first':
-                if labels_mask_flat:
+                if labels_segment_ord:
                     labels_in = tf.expand_dims(labels_in, axis=_AX_FIRST)
                 labels_in = tf.transpose(labels_in, perm=perm_axes)
             else:
-                if labels_mask_flat:
+                if labels_segment_ord:
                     labels_in = tf.expand_dims(labels_in, axis=_AX_LAST)
 
         input_shape = np.asarray(np_shape(inputs))
         labels_in_shape = np.asarray(np_shape(labels_in))
-        if labels_mask:
+        if labels_segment:
             if input_shape.size != labels_in_shape.size:
                 raise ValueError
             if np.any(input_shape[_AX_FIRST:_AX_LAST] != labels_in_shape[_AX_FIRST:_AX_LAST]):
@@ -117,9 +120,9 @@ class OrdinalOneHotEncoder(Layer):
         # move channels again to its original position
         if self.data_format != 'channels_last':
             outputs = tf.transpose(outputs, perm=perm_axes)
-            if labels_mask:
+            if labels_segment:
                 labels_out = tf.transpose(labels_out, perm=perm_axes)
-                if labels_mask_flat:
+                if labels_segment_ord:
                     labels_out = tf.squeeze(labels_in, axis=_AX_FIRST)
 
         return outputs, labels_out

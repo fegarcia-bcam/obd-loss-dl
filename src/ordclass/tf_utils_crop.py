@@ -9,19 +9,14 @@ from tensorflow.keras.layers import Cropping2D
 from tensorflow.experimental.numpy import shape as np_shape
 
 
-_N_CHANNELS_BW = 1  # luminance, grayscale
-_N_CHANNELS_COL = 3  # color coding, e.g. RGB
+_N_DIMS_BASE_2D = 2  # height, width
 
-_N_DIMS_FLAT_2D = 2  # height, width
-
-_N_DIMS_IMAGE_2D = 3  # height, width, channels
+_N_DIMS_MAIN_2D = 3  # height, width, channels
 
 _N_DIMS_BATCH_2D = 4  # batch, height, width, channels
 
-_N_CHANNELS_LABEL_IDX = 1
-
-_N_DIMS_BATCH = 1  # batch
-_N_DIMS_LABELS = 2  # batch, numeric or one-hot encoded label
+_AX_FIRST = 1  # ignores batch dim 0
+_AX_LAST = -1
 
 
 class CropCenter2D(Layer):
@@ -68,7 +63,7 @@ class CropCenter2D(Layer):
         n_dims_input = input_shape.size
 
         # check shape consistency
-        if n_dims_input not in [_N_DIMS_IMAGE_2D, _N_DIMS_BATCH_2D]:
+        if n_dims_input not in [_N_DIMS_MAIN_2D, _N_DIMS_BATCH_2D]:
             raise ValueError
 
         is_batched = (n_dims_input == _N_DIMS_BATCH_2D)

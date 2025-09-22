@@ -62,7 +62,7 @@ DIRECTION = ['maximize', 'minimize']
 
 # problem specification
 CLASS_COUNTS_BACH = np.asarray([92_316_718, 34_545_954, 5_062_670, 1_052_410, 40_648_808], dtype=np.uint64)  # pre-computed
-CLASS_PRIORS_BACH = np.asarray([0.531697, 0.198967, 0.02915838, 0.00606134, 0.2341163], dtype=np.float32)  # pre-computed
+CLASS_PRIORS_BACH = np.asarray([0.53169698, 0.19896699, 0.02915838, 0.00606134, 0.23411630], dtype=np.float32)  # pre-computed
 BUFFER_SIZE_BACH = 835  # the size of the training set
 
 # algorithmic choices

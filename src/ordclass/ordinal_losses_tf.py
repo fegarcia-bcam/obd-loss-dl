@@ -293,11 +293,11 @@ def ordinal_bin_decomp_cross_entropy_loss(n_classes, from_logits, ordin_decomp_w
     elif not isinstance(class_weight, np.ndarray) or np.any(class_weight < 0.0):
         raise ValueError
 
-    # compute overall contributions to loss from decomposition weights and KL divergences
-    kl_div_decomp = _get_kl_divergences_from_class_counts(class_counts)
+    # compute overall contributions to loss from decomposition weights and differential entropies
+    diff_entropy_decomp = _get_diff_entropy_from_class_counts(class_counts)
     ordin_contrib_weight = dict()
     for dec_ in DECOMP_ALL:
-        ordin_contrib_weight[dec_] = ordin_decomp_weight[dec_] * kl_div_decomp[dec_]
+        ordin_contrib_weight[dec_] = ordin_decomp_weight[dec_] * diff_entropy_decomp[dec_]
 
     # convert types for TensorFlow
     class_weight = tf.convert_to_tensor(class_weight, dtype=np.float32)
@@ -440,11 +440,11 @@ def ordinal_bin_decomp_focal_loss(n_classes, from_logits, ordin_decomp_weight, c
     elif not isinstance(class_weight, np.ndarray) or np.any(class_weight < 0.0):
         raise ValueError
 
-    # compute overall contributions to loss from decomposition weights and KL divergences
-    kl_div_decomp = _get_kl_divergences_from_class_counts(class_counts)
+    # compute overall contributions to loss from decomposition weights and differential entropies
+    diff_entropy_decomp = _get_diff_entropy_from_class_counts(class_counts)
     ordin_contrib_weight = dict()
     for dec_ in DECOMP_ALL:
-        ordin_contrib_weight[dec_] = ordin_decomp_weight[dec_] * kl_div_decomp[dec_]
+        ordin_contrib_weight[dec_] = ordin_decomp_weight[dec_] * diff_entropy_decomp[dec_]
 
     # convert types for TensorFlow
     class_weight = tf.convert_to_tensor(class_weight, dtype=np.float32)
@@ -621,7 +621,7 @@ def _verify_decomposition_weights(ordin_decomp_weight):
     return ordin_decomp_weight
 
 
-def _get_kl_divergences_from_class_counts(class_counts):
+def _get_diff_entropy_from_class_counts(class_counts):
 
     def h_dirichlet_fn(alpha):
         alpha_dim = alpha.size
@@ -640,11 +640,11 @@ def _get_kl_divergences_from_class_counts(class_counts):
 
     # compute differential entropies from class counts
     n_classes = class_counts.size
-    kl_div_decomp = {dec_: np.zeros(shape=(n_classes - 1,), dtype=np.float32) for dec_ in DECOMP_ORD}
+    diff_entropy_decomp = {dec_: np.zeros(shape=(n_classes - 1,), dtype=np.float32) for dec_ in DECOMP_ORD}
 
     h_max_nom = h_dirichlet_fn(alpha=np.ones(shape=(n_classes,)))
     h_obs_nom = h_dirichlet_fn(alpha=class_counts + 1)
-    kl_div_decomp[DECOMP_NOM] = h_max_nom - h_obs_nom
+    diff_entropy_decomp[DECOMP_NOM] = h_max_nom - h_obs_nom
 
     h_max_bin = 0.0
     for c in range(n_classes - 1):
@@ -653,27 +653,27 @@ def _get_kl_divergences_from_class_counts(class_counts):
         count_pos_ovn = class_counts[c + 1]
         counts_ovn = np.asarray([count_neg_ovn, count_pos_ovn])
         h_obs_ovn = h_dirichlet_fn(alpha=counts_ovn + 1)
-        kl_div_decomp['OvN'][c] = (h_max_bin - h_obs_ovn) / (n_classes - 1)
+        diff_entropy_decomp['OvN'][c] = (h_max_bin - h_obs_ovn) / (n_classes - 1)
 
         # OvS
         count_neg_ovs = class_counts[c]
         count_pos_ovs = np.sum(class_counts[(c + 1):])
         counts_ovs = np.asarray([count_neg_ovs, count_pos_ovs])
         h_obs_ovs = h_dirichlet_fn(alpha=counts_ovs + 1)
-        kl_div_decomp['OvS'][c] = (h_max_bin - h_obs_ovs) / (n_classes - 1)
+        diff_entropy_decomp['OvS'][c] = (h_max_bin - h_obs_ovs) / (n_classes - 1)
 
         # OvP
         count_neg_ovp = np.sum(class_counts[:(c + 1)])
         count_pos_ovp = class_counts[c + 1]
         counts_ovp = np.asarray([count_neg_ovp, count_pos_ovp])
         h_obs_ovp = h_dirichlet_fn(alpha=counts_ovp + 1)
-        kl_div_decomp['OvP'][c] = (h_max_bin - h_obs_ovp) / (n_classes - 1)
+        diff_entropy_decomp['OvP'][c] = (h_max_bin - h_obs_ovp) / (n_classes - 1)
 
         # OrdP
         count_neg_ordp = np.sum(class_counts[:(c + 1)])
         count_pos_ordp = np.sum(class_counts[(c + 1):])
         counts_ordp = np.asarray([count_neg_ordp, count_pos_ordp])
         h_obs_ordp = h_dirichlet_fn(alpha=counts_ordp + 1)
-        kl_div_decomp['OrdP'][c] = (h_max_bin - h_obs_ordp) / (n_classes - 1)
+        diff_entropy_decomp['OrdP'][c] = (h_max_bin - h_obs_ordp) / (n_classes - 1)
 
-    return kl_div_decomp
+    return diff_entropy_decomp
