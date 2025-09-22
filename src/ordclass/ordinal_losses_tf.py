@@ -23,7 +23,7 @@ _MAX_CLASSES = 2 ** 8
                   'regul_delta': [Interval(Real, 0.0, None, closed='neither'), None],
                   'class_weight': ['array-like', None]},
                  prefer_skip_nested_validation=True)
-def ordinal_regul_cross_entropy_loss(n_classes, from_logits, regul_type, regul_eta, regul_delta, class_weight=None):
+def or_cross_entropy_loss(n_classes, from_logits, regul_type, regul_eta, regul_delta, class_weight=None):
     # obtain regularization terms
     regul_terms, regul_eta = _get_unimodal_regul(n_classes, regul_type, regul_eta, regul_delta)
     regul_terms = tf.convert_to_tensor(regul_terms, dtype=np.float32)
@@ -73,7 +73,7 @@ def ordinal_regul_cross_entropy_loss(n_classes, from_logits, regul_type, regul_e
                   'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
                   'class_weight': ['array-like', None]},
                  prefer_skip_nested_validation=True)
-def ordinal_regul_focal_loss(n_classes, from_logits, regul_type, regul_eta, regul_delta, focal_gamma=2.0, class_weight=None):
+def or_focal_loss(n_classes, from_logits, regul_type, regul_eta, regul_delta, focal_gamma=2.0, class_weight=None):
     # obtain regularization terms
     regul_terms, regul_eta = _get_unimodal_regul(n_classes, regul_type, regul_eta, regul_delta)
     regul_terms = tf.convert_to_tensor(regul_terms, dtype=np.float32)
@@ -168,7 +168,7 @@ def _get_unimodal_regul_beta(n_classes, delta=_DEFAULT_DELTA):
                   'class_priors': ['array-like'],
                   'class_weight': [StrOptions({'balanced'}), 'array-like', None]},
                  prefer_skip_nested_validation=True)
-def ordinal_weighted_kappa_loss(n_classes, from_logits, weights, class_priors, class_weight=None):
+def owk_loss(n_classes, from_logits, weights, class_priors, class_weight=None):
     # obtain kappa weights matrix
     w = _ordinal_kappa_weights(weights=weights, n_classes=n_classes)
 
@@ -276,7 +276,7 @@ DECOMP_ALL = [DECOMP_NOM] + DECOMP_ORD
                   'class_counts': ['array-like'],
                   'class_weight': [StrOptions({'balanced'}), 'array-like', None]},
                  prefer_skip_nested_validation=True)
-def ordinal_bin_decomp_cross_entropy_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, class_weight=None):
+def obd_cross_entropy_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, class_weight=None):
     # verify decomposition weights
     ordin_decomp_weight = _verify_decomposition_weights(ordin_decomp_weight)
 
@@ -423,7 +423,7 @@ def ordinal_bin_decomp_cross_entropy_loss(n_classes, from_logits, ordin_decomp_w
                   'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
                   'class_weight': [StrOptions({'balanced'}), 'array-like', None]},
                  prefer_skip_nested_validation=True)
-def ordinal_bin_decomp_focal_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, focal_gamma=2.0, class_weight=None):
+def obd_focal_loss(n_classes, from_logits, ordin_decomp_weight, class_counts, focal_gamma=2.0, class_weight=None):
     # verify decomposition weights
     ordin_decomp_weight = _verify_decomposition_weights(ordin_decomp_weight)
 

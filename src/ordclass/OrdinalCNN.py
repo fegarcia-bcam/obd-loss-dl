@@ -28,11 +28,11 @@ from .ordinal_layers_tf import RegressionOutput, NominalOutput
 
 from .nominal_losses_tf import focal_loss
 
-from .ordinal_losses_tf import ordinal_regul_cross_entropy_loss
-from .ordinal_losses_tf import ordinal_regul_focal_loss
-from .ordinal_losses_tf import ordinal_weighted_kappa_loss
-from .ordinal_losses_tf import ordinal_bin_decomp_cross_entropy_loss
-from .ordinal_losses_tf import ordinal_bin_decomp_focal_loss
+from .ordinal_losses_tf import or_cross_entropy_loss
+from .ordinal_losses_tf import or_focal_loss
+from .ordinal_losses_tf import owk_loss
+from .ordinal_losses_tf import obd_cross_entropy_loss
+from .ordinal_losses_tf import obd_focal_loss
 
 
 _MIN_CLASSES = 3
@@ -41,9 +41,9 @@ _MAX_CLASSES = 2 ** 8
 ORDINAL_OUTPUT_TYPES = ['regression', 'nominal']
 ORDINAL_LOSSES_UNET = ['reg_mae', 'reg_mse',
                        'nom_cross_entropy', 'nom_focal',
-                       'ord_regul_cross_entropy', 'ord_regul_focal',
-                       'ord_weight_kappa',
-                       'ord_bin_decomp_cross_entropy', 'ord_bin_decomp_focal']
+                       'or_cross_entropy', 'or_focal',
+                       'owk',
+                       'obd_cross_entropy', 'obd_focal']
 
 
 class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
@@ -53,7 +53,7 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
             n_classes,
             out_type='nominal',
             to_logits=True,
-            loss='ord_regul_cross_entropy',
+            loss='or_cross_entropy',
             regul_type=None,
             regul_eta=0.0,
             regul_delta=1.0,
@@ -396,7 +396,7 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             n_classes,
             out_type='nominal',
             to_logits=True,
-            loss='ord_regul_cross_entropy',
+            loss='or_cross_entropy',
             regul_type=None,
             regul_eta=0.0,
             regul_delta=1.0,
@@ -600,40 +600,40 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
                                from_logits=self.to_logits,
                                gamma=self.focal_gamma,
                                class_weight=self.class_weight_)
-        elif self.loss == 'ord_regul_cross_entropy':
-            loss_ = ordinal_regul_cross_entropy_loss(n_classes=self.n_classes,
-                                                     from_logits=self.to_logits,
-                                                     regul_type=self.regul_type,
-                                                     regul_eta=self.regul_eta,
-                                                     regul_delta=self.regul_delta,
-                                                     class_weight=self.class_weight_)
-        elif self.loss == 'ord_regul_focal':
-            loss_ = ordinal_regul_focal_loss(n_classes=self.n_classes,
-                                             from_logits=self.to_logits,
-                                             regul_type=self.regul_type,
-                                             regul_eta=self.regul_eta,
-                                             regul_delta=self.regul_delta,
-                                             focal_gamma=self.focal_gamma,
-                                             class_weight=self.class_weight_)
-        elif self.loss == 'ord_weight_kappa':
-            loss_ = ordinal_weighted_kappa_loss(n_classes=self.n_classes,
-                                                from_logits=self.to_logits,
-                                                weights=self.kappa_weights,
-                                                class_priors=self.class_priors_,
-                                                class_weight=self.class_weight_)
-        elif self.loss == 'ord_bin_decomp_cross_entropy':
-            loss_ = ordinal_bin_decomp_cross_entropy_loss(n_classes=self.n_classes,
-                                                          from_logits=self.to_logits,
-                                                          ordin_decomp_weight=self.ordin_decomp_weight,
-                                                          class_counts=self.class_counts_,
-                                                          class_weight=self.class_weight_)
-        elif self.loss == 'ord_bin_decomp_focal':
-            loss_ = ordinal_bin_decomp_focal_loss(n_classes=self.n_classes,
-                                                  from_logits=self.to_logits,
-                                                  ordin_decomp_weight=self.ordin_decomp_weight,
-                                                  class_counts=self.class_counts_,
-                                                  focal_gamma=self.focal_gamma,
-                                                  class_weight=self.class_weight_)
+        elif self.loss == 'or_cross_entropy':
+            loss_ = or_cross_entropy_loss(n_classes=self.n_classes,
+                                          from_logits=self.to_logits,
+                                          regul_type=self.regul_type,
+                                          regul_eta=self.regul_eta,
+                                          regul_delta=self.regul_delta,
+                                          class_weight=self.class_weight_)
+        elif self.loss == 'or_focal':
+            loss_ = or_focal_loss(n_classes=self.n_classes,
+                                  from_logits=self.to_logits,
+                                  regul_type=self.regul_type,
+                                  regul_eta=self.regul_eta,
+                                  regul_delta=self.regul_delta,
+                                  focal_gamma=self.focal_gamma,
+                                  class_weight=self.class_weight_)
+        elif self.loss == 'owk':
+            loss_ = owk_loss(n_classes=self.n_classes,
+                             from_logits=self.to_logits,
+                             weights=self.kappa_weights,
+                             class_priors=self.class_priors_,
+                             class_weight=self.class_weight_)
+        elif self.loss == 'obd_cross_entropy':
+            loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
+                                           from_logits=self.to_logits,
+                                           ordin_decomp_weight=self.ordin_decomp_weight,
+                                           class_counts=self.class_counts_,
+                                           class_weight=self.class_weight_)
+        elif self.loss == 'obd_focal':
+            loss_ = obd_focal_loss(n_classes=self.n_classes,
+                                   from_logits=self.to_logits,
+                                   ordin_decomp_weight=self.ordin_decomp_weight,
+                                   class_counts=self.class_counts_,
+                                   focal_gamma=self.focal_gamma,
+                                   class_weight=self.class_weight_)
         else:
             raise ValueError
         self.loss_ = loss_
@@ -685,7 +685,7 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             n_classes,
             out_type='nominal',
             to_logits=True,
-            loss='ord_regul_cross_entropy',
+            loss='or_cross_entropy',
             regul_type=None,
             regul_eta=0.0,
             regul_delta=1.0,
@@ -888,40 +888,40 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
                                from_logits=self.to_logits,
                                gamma=self.focal_gamma,
                                class_weight=self.class_weight_)
-        elif self.loss == 'ord_regul_cross_entropy':
-            loss_ = ordinal_regul_cross_entropy_loss(n_classes=self.n_classes,
-                                                     from_logits=self.to_logits,
-                                                     regul_type=self.regul_type,
-                                                     regul_eta=self.regul_eta,
-                                                     regul_delta=self.regul_delta,
-                                                     class_weight=self.class_weight_)
-        elif self.loss == 'ord_regul_focal':
-            loss_ = ordinal_regul_focal_loss(n_classes=self.n_classes,
-                                             from_logits=self.to_logits,
-                                             regul_type=self.regul_type,
-                                             regul_eta=self.regul_eta,
-                                             regul_delta=self.regul_delta,
-                                             focal_gamma=self.focal_gamma,
-                                             class_weight=self.class_weight_)
-        elif self.loss == 'ord_weight_kappa':
-            loss_ = ordinal_weighted_kappa_loss(n_classes=self.n_classes,
-                                                from_logits=self.to_logits,
-                                                weights=self.kappa_weights,
-                                                class_priors=self.class_priors_,
-                                                class_weight=self.class_weight_)
-        elif self.loss == 'ord_bin_decomp_cross_entropy':
-            loss_ = ordinal_bin_decomp_cross_entropy_loss(n_classes=self.n_classes,
-                                                          from_logits=self.to_logits,
-                                                          ordin_decomp_weight=self.ordin_decomp_weight,
-                                                          class_counts=self.class_counts_,
-                                                          class_weight=self.class_weight_)
-        elif self.loss == 'ord_bin_decomp_focal':
-            loss_ = ordinal_bin_decomp_focal_loss(n_classes=self.n_classes,
-                                                  from_logits=self.to_logits,
-                                                  ordin_decomp_weight=self.ordin_decomp_weight,
-                                                  class_counts=self.class_counts_,
-                                                  focal_gamma=self.focal_gamma,
-                                                  class_weight=self.class_weight_)
+        elif self.loss == 'or_cross_entropy':
+            loss_ = or_cross_entropy_loss(n_classes=self.n_classes,
+                                          from_logits=self.to_logits,
+                                          regul_type=self.regul_type,
+                                          regul_eta=self.regul_eta,
+                                          regul_delta=self.regul_delta,
+                                          class_weight=self.class_weight_)
+        elif self.loss == 'or_focal':
+            loss_ = or_focal_loss(n_classes=self.n_classes,
+                                  from_logits=self.to_logits,
+                                  regul_type=self.regul_type,
+                                  regul_eta=self.regul_eta,
+                                  regul_delta=self.regul_delta,
+                                  focal_gamma=self.focal_gamma,
+                                  class_weight=self.class_weight_)
+        elif self.loss == 'owk':
+            loss_ = owk_loss(n_classes=self.n_classes,
+                             from_logits=self.to_logits,
+                             weights=self.kappa_weights,
+                             class_priors=self.class_priors_,
+                             class_weight=self.class_weight_)
+        elif self.loss == 'obd_cross_entropy':
+            loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
+                                           from_logits=self.to_logits,
+                                           ordin_decomp_weight=self.ordin_decomp_weight,
+                                           class_counts=self.class_counts_,
+                                           class_weight=self.class_weight_)
+        elif self.loss == 'obd_focal':
+            loss_ = obd_focal_loss(n_classes=self.n_classes,
+                                   from_logits=self.to_logits,
+                                   ordin_decomp_weight=self.ordin_decomp_weight,
+                                   class_counts=self.class_counts_,
+                                   focal_gamma=self.focal_gamma,
+                                   class_weight=self.class_weight_)
         else:
             raise ValueError
         self.loss_ = loss_
