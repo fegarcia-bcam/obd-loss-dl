@@ -10,8 +10,13 @@
 /data
 /results
 
+/src/ordclass/libsvmrank
+/src/ordclass/svorex
+
 # Custom file extension
 # *.sl
 *.out
+
 *.json
 
+*.def
