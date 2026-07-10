@@ -1,4 +1,4 @@
-# Authors:  Fernando García-García <fegarcia@bcamath.org>
+# Author: Fernando García-García <fegarcia@bcamath.org>
 
 import sys
 
@@ -6,7 +6,7 @@ from numbers import Integral, Real
 
 import numpy as np
 
-from sklearn.base import ClassifierMixin, BaseEstimator
+from sklearn.base import ClassifierMixin, BaseEstimator, _fit_context
 from sklearn.utils import check_random_state
 from sklearn.utils._param_validation import Interval, Options, StrOptions, InvalidParameterError
 from sklearn.utils.validation import check_is_fitted
@@ -17,33 +17,33 @@ from tensorflow.keras.layers import Input, Flatten, Dense, Dropout
 
 from tensorflow.keras.initializers import GlorotUniform, Constant
 
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers import Adam, AdamW
 from tensorflow.keras.callbacks import EarlyStopping
 
 from tensorflow.keras.losses import CategoricalCrossentropy
 
 from tensorflow.keras.applications import EfficientNetB0, EfficientNetB5
 
-from .ordinal_layers_tf import RegressionOutput, NominalOutput
+from src.ordclass.OrdinalLayer import Regression, Nominal
 
-from .nominal_losses_tf import focal_loss
+from src.ordclass.nominal_losses import focal_loss
 
-from .ordinal_losses_tf import or_cross_entropy_loss
-from .ordinal_losses_tf import or_focal_loss
-from .ordinal_losses_tf import owk_loss
-from .ordinal_losses_tf import obd_cross_entropy_loss
-from .ordinal_losses_tf import obd_focal_loss
+from src.ordclass.ordinal_losses import ur_ce_loss, ur_focal_loss
+from src.ordclass.ordinal_losses import owk_loss
+from src.ordclass.ordinal_losses import obd_ce_loss, obd_focal_loss
 
+from src.ordclass.OWK import compute_owk_weight
+from src.ordclass.OBD import compute_obd_weight
 
 _MIN_CLASSES = 3
 _MAX_CLASSES = 2 ** 8
 
-ORDINAL_OUTPUT_TYPES = ['regression', 'nominal']
-ORDINAL_LOSSES_UNET = ['reg_mae', 'reg_mse',
-                       'nom_cross_entropy', 'nom_focal',
-                       'or_cross_entropy', 'or_focal',
+ORDINAL_OUTPUT_TYPES = ['regress', 'nominal']
+ORDINAL_LOSSES_OCNN = ['reg_mae', 'reg_mse',
+                       'nom_ce', 'nom_focal',
+                       'ur_ce', 'ur_focal',
                        'owk',
-                       'obd_cross_entropy', 'obd_focal']
+                       'obd_ce', 'obd_focal']
 
 
 class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
@@ -51,60 +51,59 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
     def __init__(
             self,
             n_classes,
+            *,
             out_type='nominal',
             to_logits=True,
-            loss='or_cross_entropy',
-            regul_type=None,
-            regul_eta=0.0,
-            regul_delta=1.0,
-            kappa_weights='quadratic',
-            focal_gamma=2.0,
-            obd_weight='balanced',
-            class_counts=None,
-            class_priors=None,
+            loss='ur_ce',
+            gamma=2.0,
+            ur_type=None,
+            ur_eta=0.0,
+            ur_delta=1.0,
+            owk_penalty='quadratic',
+            obd_w_method='diff_entropy',
             class_weight='balanced',
-
             input_height=224,
             input_width=224,
             input_channels=3,
-
             weights='imagenet',
             pooling='avg',
             n_dense=(256, 64),
             activation='swish',
             dropout=0.1,
             freeze_blocks='none',
-
             epochs=100,
-            batch_size=16,
-            solver='adam',
-            learning_rate=0.001,
+            batch_size=64,
+            optimizer='AdamW',
+            learning_rate=1.0e-3,
             patience=10,
             min_delta=0.0,
             beta_1=0.900,
             beta_2=0.999,
             epsilon=1.0e-07,
-            weight_decay=None,
-
+            weight_decay=4.0e-3,
             verbose='auto',
             random_state=None
     ):
         self.n_classes = n_classes
         self.out_type = out_type
         self.to_logits = to_logits
+
         self.loss = loss
-        if (self.out_type == 'regression') and (self.loss not in ['reg_mae', 'reg_mse']):
+        if (self.out_type == 'regress') and (self.loss not in ['reg_mae', 'reg_mse']):
             raise InvalidParameterError
-        if (self.out_type != 'regression') and (self.loss in ['reg_mae', 'reg_mse']):
+        if (self.out_type != 'regress') and (self.loss in ['reg_mae', 'reg_mse']):
             raise InvalidParameterError
-        self.regul_type = regul_type
-        self.regul_eta = regul_eta
-        self.regul_delta = regul_delta
-        self.kappa_weights = kappa_weights
-        self.focal_gamma = focal_gamma
-        self.obd_weight = obd_weight
-        self.class_counts = class_counts
-        self.class_priors = class_priors
+
+        self.gamma = gamma
+
+        self.ur_type = ur_type
+        self.ur_eta = ur_eta
+        self.ur_delta = ur_delta
+
+        self.owk_penalty = owk_penalty
+
+        self.obd_w_method = obd_w_method
+
         self.class_weight = class_weight
 
         self.input_height = input_height
@@ -118,14 +117,15 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
             if (n_d <= 0) or (not isinstance(n_d, int)):
                 raise InvalidParameterError
         self.n_dense = n_dense
-
         self.activation = activation
+
         self.dropout = dropout
+
         self.freeze_blocks = freeze_blocks
 
         self.epochs = epochs
         self.batch_size = batch_size
-        self.solver = solver
+        self.optimizer = optimizer
         self.learning_rate = learning_rate
         self.patience = patience
         self.min_delta = min_delta
@@ -137,56 +137,50 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
         self.verbose = verbose
         self.random_state = random_state
 
-    def _build(self):
+        self._random_state = check_random_state(self.random_state)
+
         self.model_ = None
+
+    def _build(self):
         raise NotImplementedError
 
     def _get_class_counts(self, X, ohe=True):
-        class_counts = np.zeros(shape=(self.n_classes,), dtype=np.uint64)
+        class_counts = [0] * self.n_classes
         for _, lbl in X:
             if ohe:
                 lbl = tf.math.argmax(lbl, axis=-1)  # revert one-hot encoding
-            else:
-                lbl = tf.squeeze(lbl, axis=-1)
+            lbl = tf.squeeze(lbl)
 
-            for c in range(self.n_classes):
-                class_equal = tf.equal(lbl, c)
-                class_equal = tf.cast(class_equal, dtype=tf.uint64)
-                class_counts[c] += tf.math.reduce_sum(class_equal, axis=None).numpy()
+            # count everything in the batch at once
+            cl_idx, _, cl_counts = tf.unique_with_counts(lbl)
+            for c_, counts_ in zip(cl_idx.numpy(), cl_counts.numpy()):
+                class_counts[int(c_)] += int(counts_)
 
         return class_counts
-
-    def _get_class_priors(self, X, ohe=True):
-        class_counts =  self._get_class_counts(X, ohe=ohe)
-        class_priors = class_counts / np.sum(class_counts)
-        class_priors = class_priors.astype(np.float32)
-        return class_priors
 
     def _fit(self, X):
         # check parameters
         self._validate_params()
 
-        # compute class counts, priors and weights, if necessary
-        if self.class_counts is not None:
-            self.class_counts_ = self.class_counts
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_counts_ = self._get_class_counts(X, ohe=ohe)
+        # compute class counts, priors and weights
+        ohe_ = (self.out_type != 'regress')
+        self.class_counts_ = self._get_class_counts(X, ohe=ohe_)
+        if self.verbose:
+            print('Class counts: {}'.format(self.class_counts_), flush=True)
 
-        if self.class_priors is not None:
-            self.class_priors_ = self.class_priors
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_priors_ = self._get_class_priors(X, ohe=ohe)
+        class_priors_ = self.class_counts_ / np.sum(self.class_counts_)
+        self.class_priors_ = class_priors_.astype(np.float32)
+        if self.verbose:
+            print('Class priors: {}'.format(self.class_priors_), flush=True)
 
         if self.class_weight is None:
             self.class_weight_ = np.ones(shape=(self.n_classes,), dtype=np.float32)
         elif isinstance(self.class_weight, str) and (self.class_weight == 'balanced'):
             self.class_weight_ = 1.0 / (self.class_priors_ * self.n_classes)
-        elif not isinstance(self.class_weight, np.ndarray) or np.any(self.class_weight < 0.0):
-            raise ValueError
         else:
             self.class_weight_ = self.class_weight
+        if self.verbose:
+            print('Class weights: {}'.format(self.class_weight_), flush=True)
 
         # early stopping
         callback_early_stop = EarlyStopping(monitor='loss', mode='min',
@@ -194,15 +188,18 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
                                             restore_best_weights=True)
 
         # build the CNN model
-        self._build()
+        if self.model_ is None:
+            self._build()
 
         # run the training
         self.history_ = self.model_.fit(x=X, y=None,
                                         epochs=self.epochs,
                                         callbacks=[callback_early_stop],
                                         verbose=self.verbose)
+        self._is_fitted = True
         return self
 
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X, y):
         return self._fit(X)
 
@@ -210,27 +207,25 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
         # check parameters
         self._validate_params()
 
-        # compute class counts, priors and weights, if necessary
-        if self.class_counts is not None:
-            self.class_counts_ = self.class_counts
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_counts_ = self._get_class_counts(X, ohe=ohe)
+        # compute class counts, priors and weights
+        ohe_ = (self.out_type != 'regress')
+        self.class_counts_ = self._get_class_counts(X, ohe=ohe_)
+        if self.verbose:
+            print('Class counts: {}'.format(self.class_counts_), flush=True)
 
-        if self.class_priors is not None:
-            self.class_priors_ = self.class_priors
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_priors_ = self._get_class_priors(X, ohe=ohe)
+        class_priors_ = self.class_counts_ / np.sum(self.class_counts_)
+        self.class_priors_ = class_priors_.astype(np.float32)
+        if self.verbose:
+            print('Class priors: {}'.format(self.class_priors_), flush=True)
 
         if self.class_weight is None:
             self.class_weight_ = np.ones(shape=(self.n_classes,), dtype=np.float32)
         elif isinstance(self.class_weight, str) and (self.class_weight == 'balanced'):
             self.class_weight_ = 1.0 / (self.class_priors_ * self.n_classes)
-        elif not isinstance(self.class_weight, np.ndarray) or np.any(self.class_weight < 0.0):
-            raise ValueError
         else:
             self.class_weight_ = self.class_weight
+        if self.verbose:
+            print('Class weights: {}'.format(self.class_weight_), flush=True)
 
         # early stopping
         callback_early_stop = EarlyStopping(monitor='val_loss', mode='min',
@@ -238,7 +233,8 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
                                             restore_best_weights=True)
 
         # build the CNN model
-        self._build()
+        if self.model_ is None:
+            self._build()
 
         # run the training
         self.history_ = self.model_.fit(x=X,
@@ -246,13 +242,15 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
                                         epochs=self.epochs,
                                         callbacks=[callback_early_stop],
                                         verbose=self.verbose)
+        self._is_fitted = True
         return self
 
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit_valid(self, X, X_val):
         return self._fit_valid(X, X_val)
 
     def _predict(self, X):
-        if self.out_type == 'regression':
+        if self.out_type == 'regress':
             y_pred = self.model_(X)
             y_pred = tf.round(y_pred)
             y_pred = tf.clip_by_value(y_pred, 0, self.n_classes - 1)
@@ -265,7 +263,7 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
         return y_pred
 
     def _predict_proba(self, X):
-        if self.out_type == 'regression':
+        if self.out_type == 'regress':
             raise NotImplementedError
 
         proba_pred = self.model_(X)
@@ -321,7 +319,7 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
 
         scores = []
         for X_, y_ in X:
-            if self.out_type == 'regression':
+            if self.out_type == 'regress':
                 y_true_ = tf.squeeze(y_, axis=-1)
             else:
                 y_true_ = tf.math.argmax(y_, axis=-1)  # revert one-hot encoding
@@ -346,6 +344,9 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
         score = np.mean(scores)
         return score
 
+    def __sklearn_is_fitted__(self):
+        return hasattr(self, '_is_fitted') and self._is_fitted
+
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
         tags.non_deterministic = True
@@ -353,6 +354,7 @@ class OrdinalCNN2DBase(ClassifierMixin, BaseEstimator):
 
 
 class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
+
     _N_BLOCKS_EFFB0 = 7
     _PREPROC_LAYERS_EFFB0 = ['input', 'rescaling', 'normalization', 'stem']
     _BLOCK_NAME_EFFB0 = 'block{}'
@@ -361,23 +363,12 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
         'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')],
         'out_type': [StrOptions({*ORDINAL_OUTPUT_TYPES})],
         'to_logits': ['boolean'],
-        'loss': [StrOptions({*ORDINAL_LOSSES_UNET})],
-        'regul_type': [StrOptions({'beta'}), None],
-        'regul_eta': [Interval(Real, 0.0, 1.0, closed='both'), None],
-        'regul_delta': [Interval(Real, 0.0, None, closed='neither'), None],
-        'kappa_weights': [StrOptions({'nominal', 'linear', 'quadratic'}), 'array-like'],
-        'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
-        'obd_weight': [StrOptions({'balanced'}), dict, None],
-        'class_counts': ['array-like', None],
-        'class_priors': ['array-like', None],
+        'loss': [StrOptions({*ORDINAL_LOSSES_OCNN})],
         'class_weight': [StrOptions({'balanced'}), 'array-like', None],
-
         'weights': [StrOptions({'imagenet'}), None],
         'pooling': [StrOptions({'avg', 'max'}), None],
-
         'dropout': [Interval(Real, 0.0, 1.0, closed='both'), None],
         'freeze_blocks': [Interval(Integral, 0, _N_BLOCKS_EFFB0, closed='both'), StrOptions({'none', 'all'})],
-
         'epochs': [Interval(Integral, 1, None, closed='left')],
         'batch_size': [Interval(Integral, 1, None, closed='left')],
         'learning_rate': [Interval(Real, 0.0, None, closed='neither')],
@@ -386,7 +377,6 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
         'beta_1': [Interval(Real, 0.0, 1.0, closed='left')],
         'beta_2': [Interval(Real, 0.0, 1.0, closed='left')],
         'epsilon': [Interval(Real, 0.0, None, closed='neither')],
-
         'verbose': [Interval(Integral, 0, 2, closed='both'), StrOptions({'auto'})],
         'random_state': ['random_state']
     }
@@ -394,42 +384,36 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
     def __init__(
             self,
             n_classes,
+            *,
             out_type='nominal',
             to_logits=True,
-            loss='or_cross_entropy',
-            regul_type=None,
-            regul_eta=0.0,
-            regul_delta=1.0,
-            kappa_weights='quadratic',
-            obd_weight='balanced',
-            focal_gamma=2.0,
-            class_counts=None,
-            class_priors=None,
+            loss='ur_ce',
+            gamma=2.0,
+            ur_type=None,
+            ur_eta=0.0,
+            ur_delta=1.0,
+            owk_penalty='quadratic',
+            obd_w_method='diff_entropy',
             class_weight='balanced',
-
             input_height=224,
             input_width=224,
             input_channels=3,
-
             weights='imagenet',
             pooling='avg',
-
             n_dense=(256, 64),
             activation='swish',
             dropout=0.1,
             freeze_blocks='none',
-
             epochs=100,
-            batch_size=16,
-            solver='adam',
-            learning_rate=0.001,
+            batch_size=64,
+            optimizer='AdamW',
+            learning_rate=1.0e-3,
             patience=10,
             min_delta=0.0,
             beta_1=0.900,
             beta_2=0.999,
             epsilon=1.0e-07,
-            weight_decay=None,
-
+            weight_decay=4.0e-3,
             verbose='auto',
             random_state=None
     ):
@@ -438,20 +422,16 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             out_type=out_type,
             to_logits=to_logits,
             loss=loss,
-            regul_type=regul_type,
-            regul_eta=regul_eta,
-            regul_delta=regul_delta,
-            kappa_weights=kappa_weights,
-            focal_gamma=focal_gamma,
-            obd_weight=obd_weight,
-            class_counts=class_counts,
-            class_priors=class_priors,
+            gamma=gamma,
+            ur_type=ur_type,
+            ur_eta=ur_eta,
+            ur_delta=ur_delta,
+            owk_penalty=owk_penalty,
+            obd_w_method=obd_w_method,
             class_weight=class_weight,
-
             input_height=input_height,
             input_width=input_width,
             input_channels=input_channels,
-
             weights=weights,
             pooling=pooling,
             n_dense=n_dense,
@@ -459,8 +439,7 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             dropout=dropout,
             epochs=epochs,
             batch_size=batch_size,
-            solver=solver,
-
+            optimizer=optimizer,
             learning_rate=learning_rate,
             patience=patience,
             min_delta=min_delta,
@@ -468,7 +447,6 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             beta_2=beta_2,
             epsilon=epsilon,
             weight_decay=weight_decay,
-
             verbose=verbose,
             random_state=random_state
         )
@@ -546,27 +524,27 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
         seed_out = self._random_state.randint(sys.maxsize)
         kernel_init_out = GlorotUniform(seed=seed_out)  # initialization as in Glorot et al.
 
-        if self.out_type == 'regression':
+        if self.out_type == 'regress':
             # initial guess for bias
             idx_classes = np.arange(self.n_classes)
             bias_init_out = np.dot(idx_classes, self.class_priors_)
             bias_init_out = Constant(bias_init_out)
 
-            layer_ord_out = RegressionOutput(n_classes=self.n_classes,
-                                             kernel_initializer=kernel_init_out,
-                                             bias_initializer=bias_init_out,
-                                             name='output')
+            layer_ord_out = Regression(n_classes=self.n_classes,
+                                       kernel_initializer=kernel_init_out,
+                                       bias_initializer=bias_init_out,
+                                       name='output')
 
         elif self.out_type == 'nominal':
             # initial guess for bias
             bias_init_out = np.log(self.class_priors_)
             bias_init_out = Constant(bias_init_out)
 
-            layer_ord_out = NominalOutput(n_classes=self.n_classes,
-                                          to_logits=self.to_logits,
-                                          kernel_initializer=kernel_init_out,
-                                          bias_initializer=bias_init_out,
-                                          name='output')
+            layer_ord_out = Nominal(n_classes=self.n_classes,
+                                    to_logits=self.to_logits,
+                                    kernel_initializer=kernel_init_out,
+                                    bias_initializer=bias_init_out,
+                                    name='output')
 
         else:
             raise ValueError
@@ -580,11 +558,15 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
         if self.verbose:
             self.model_.summary(expand_nested=True, show_trainable=True)
 
-        # prepare the optimization solver
-        if self.solver == 'adam':
+        # prepare the optimization optimizer
+        if self.optimizer == 'Adam':
             self._optimizer = Adam(learning_rate=self.learning_rate,
                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
                                    weight_decay=self.weight_decay)
+        elif self.optimizer == 'AdamW':
+            self._optimizer = AdamW(learning_rate=self.learning_rate,
+                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
+                                    weight_decay=self.weight_decay)
         else:
             raise NotImplementedError
 
@@ -593,46 +575,50 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
             loss_ = 'mae'
         elif self.loss == 'reg_mse':
             loss_ = 'mse'
-        elif self.loss == 'nom_cross_entropy':
+        elif self.loss == 'nom_ce':
             loss_ = CategoricalCrossentropy(from_logits=self.to_logits)
         elif self.loss == 'nom_focal':
             loss_ = focal_loss(n_classes=self.n_classes,
                                from_logits=self.to_logits,
-                               gamma=self.focal_gamma,
+                               gamma=self.gamma,
                                class_weight=self.class_weight_)
-        elif self.loss == 'or_cross_entropy':
-            loss_ = or_cross_entropy_loss(n_classes=self.n_classes,
-                                          from_logits=self.to_logits,
-                                          regul_type=self.regul_type,
-                                          regul_eta=self.regul_eta,
-                                          regul_delta=self.regul_delta,
-                                          class_weight=self.class_weight_)
-        elif self.loss == 'or_focal':
-            loss_ = or_focal_loss(n_classes=self.n_classes,
+        elif self.loss == 'ur_ce':
+            loss_ = ur_ce_loss(n_classes=self.n_classes,
+                               from_logits=self.to_logits,
+                               ur_type=self.ur_type,
+                               ur_eta=self.ur_eta,
+                               ur_delta=self.ur_delta,
+                               class_weight=self.class_weight_)
+        elif self.loss == 'ur_focal':
+            loss_ = ur_focal_loss(n_classes=self.n_classes,
                                   from_logits=self.to_logits,
-                                  regul_type=self.regul_type,
-                                  regul_eta=self.regul_eta,
-                                  regul_delta=self.regul_delta,
-                                  focal_gamma=self.focal_gamma,
+                                  ur_type=self.ur_type,
+                                  ur_eta=self.ur_eta,
+                                  ur_delta=self.ur_delta,
+                                  gamma=self.gamma,
                                   class_weight=self.class_weight_)
         elif self.loss == 'owk':
+            self.owk_weight_ = compute_owk_weight(n_classes=self.n_classes,
+                                                  penalty=self.owk_penalty)
             loss_ = owk_loss(n_classes=self.n_classes,
                              from_logits=self.to_logits,
-                             weights=self.kappa_weights,
+                             owk_weight=self.owk_weight_,
                              class_priors=self.class_priors_,
                              class_weight=self.class_weight_)
-        elif self.loss == 'obd_cross_entropy':
-            loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
-                                           from_logits=self.to_logits,
-                                           obd_weight=self.obd_weight,
-                                           class_counts=self.class_counts_,
-                                           class_weight=self.class_weight_)
+        elif self.loss == 'obd_ce':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
+            loss_ = obd_ce_loss(n_classes=self.n_classes,
+                                from_logits=self.to_logits,
+                                obd_weight=self.obd_weight_,
+                                class_weight=self.class_weight_)
         elif self.loss == 'obd_focal':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
             loss_ = obd_focal_loss(n_classes=self.n_classes,
                                    from_logits=self.to_logits,
-                                   obd_weight=self.obd_weight,
-                                   class_counts=self.class_counts_,
-                                   focal_gamma=self.focal_gamma,
+                                   gamma=self.gamma,
+                                   obd_weight=self.obd_weight_,
                                    class_weight=self.class_weight_)
         else:
             raise ValueError
@@ -640,8 +626,11 @@ class OrdinalCNN2DEffB0(OrdinalCNN2DBase):
 
         self.model_.compile(optimizer=self._optimizer, loss=self.loss_)
 
+        return
+
 
 class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
+
     _N_BLOCKS_EFFB5 = 7
     _PREPROC_LAYERS_EFFB5 = ['input', 'rescaling', 'normalization', 'stem']
     _BLOCK_NAME_EFFB5 = 'block{}'
@@ -650,23 +639,12 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
         'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')],
         'out_type': [StrOptions({*ORDINAL_OUTPUT_TYPES})],
         'to_logits': ['boolean'],
-        'loss': [StrOptions({*ORDINAL_LOSSES_UNET})],
-        'regul_type': [StrOptions({'beta'}), None],
-        'regul_eta': [Interval(Real, 0.0, 1.0, closed='both'), None],
-        'regul_delta': [Interval(Real, 0.0, None, closed='neither'), None],
-        'kappa_weights': [StrOptions({'nominal', 'linear', 'quadratic'}), 'array-like'],
-        'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
-        'obd_weight': [StrOptions({'balanced'}), dict, None],
-        'class_counts': ['array-like', None],
-        'class_priors': ['array-like', None],
+        'loss': [StrOptions({*ORDINAL_LOSSES_OCNN})],
         'class_weight': [StrOptions({'balanced'}), 'array-like', None],
-
         'weights': [StrOptions({'imagenet'}), None],
         'pooling': [StrOptions({'avg', 'max'}), None],
-
         'dropout': [Interval(Real, 0.0, 1.0, closed='both'), None],
         'freeze_blocks': [Interval(Integral, 0, _N_BLOCKS_EFFB5, closed='both'), StrOptions({'none', 'all'})],
-
         'epochs': [Interval(Integral, 1, None, closed='left')],
         'batch_size': [Interval(Integral, 1, None, closed='left')],
         'learning_rate': [Interval(Real, 0.0, None, closed='neither')],
@@ -675,7 +653,6 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
         'beta_1': [Interval(Real, 0.0, 1.0, closed='left')],
         'beta_2': [Interval(Real, 0.0, 1.0, closed='left')],
         'epsilon': [Interval(Real, 0.0, None, closed='neither')],
-
         'verbose': [Interval(Integral, 0, 2, closed='both'), StrOptions({'auto'})],
         'random_state': ['random_state']
     }
@@ -683,41 +660,36 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
     def __init__(
             self,
             n_classes,
+            *,
             out_type='nominal',
             to_logits=True,
-            loss='or_cross_entropy',
-            regul_type=None,
-            regul_eta=0.0,
-            regul_delta=1.0,
-            kappa_weights='quadratic',
-            focal_gamma=2.0,
-            obd_weight='balanced',
-            class_counts=None,
-            class_priors=None,
+            loss='ur_ce',
+            gamma=2.0,
+            ur_type=None,
+            ur_eta=0.0,
+            ur_delta=1.0,
+            owk_penalty='quadratic',
+            obd_w_method='diff_entropy',
             class_weight='balanced',
-
             input_height=456,
             input_width=456,
             input_channels=3,
-
             weights='imagenet',
             pooling='avg',
             n_dense=(256, 64),
             activation='swish',
             dropout=0.1,
             freeze_blocks='none',
-
             epochs=100,
-            batch_size=16,
-            solver='adam',
-            learning_rate=0.001,
+            batch_size=64,
+            optimizer='AdamW',
+            learning_rate=1.0e-3,
             patience=10,
             min_delta=0.0,
             beta_1=0.900,
             beta_2=0.999,
             epsilon=1.0e-07,
-            weight_decay=None,
-
+            weight_decay=4.0e-3,
             verbose='auto',
             random_state=None
     ):
@@ -726,20 +698,16 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             out_type=out_type,
             to_logits=to_logits,
             loss=loss,
-            regul_type=regul_type,
-            regul_eta=regul_eta,
-            regul_delta=regul_delta,
-            kappa_weights=kappa_weights,
-            focal_gamma=focal_gamma,
-            obd_weight=obd_weight,
-            class_counts=class_counts,
-            class_priors=class_priors,
+            gamma=gamma,
+            ur_type=ur_type,
+            ur_eta=ur_eta,
+            ur_delta=ur_delta,
+            owk_penalty=owk_penalty,
+            obd_w_method=obd_w_method,
             class_weight=class_weight,
-
             input_height=input_height,
             input_width=input_width,
             input_channels=input_channels,
-
             weights=weights,
             pooling=pooling,
             n_dense=n_dense,
@@ -747,8 +715,7 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             dropout=dropout,
             epochs=epochs,
             batch_size=batch_size,
-            solver=solver,
-
+            optimizer=optimizer,
             learning_rate=learning_rate,
             patience=patience,
             min_delta=min_delta,
@@ -756,7 +723,6 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             beta_2=beta_2,
             epsilon=epsilon,
             weight_decay=weight_decay,
-
             verbose=verbose,
             random_state=random_state
         )
@@ -834,27 +800,27 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
         seed_out = self._random_state.randint(sys.maxsize)
         kernel_init_out = GlorotUniform(seed=seed_out)  # initialization as in Glorot et al.
 
-        if self.out_type == 'regression':
+        if self.out_type == 'regress':
             # initial guess for bias
             idx_classes = np.arange(self.n_classes)
             bias_init_out = np.dot(idx_classes, self.class_priors_)
             bias_init_out = Constant(bias_init_out)
 
-            layer_ord_out = RegressionOutput(n_classes=self.n_classes,
-                                             kernel_initializer=kernel_init_out,
-                                             bias_initializer=bias_init_out,
-                                             name='output')
+            layer_ord_out = Regression(n_classes=self.n_classes,
+                                       kernel_initializer=kernel_init_out,
+                                       bias_initializer=bias_init_out,
+                                       name='output')
 
         elif self.out_type == 'nominal':
             # initial guess for bias
             bias_init_out = np.log(self.class_priors_)
             bias_init_out = Constant(bias_init_out)
 
-            layer_ord_out = NominalOutput(n_classes=self.n_classes,
-                                          to_logits=self.to_logits,
-                                          kernel_initializer=kernel_init_out,
-                                          bias_initializer=bias_init_out,
-                                          name='output')
+            layer_ord_out = Nominal(n_classes=self.n_classes,
+                                    to_logits=self.to_logits,
+                                    kernel_initializer=kernel_init_out,
+                                    bias_initializer=bias_init_out,
+                                    name='output')
 
         else:
             raise ValueError
@@ -868,11 +834,15 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
         if self.verbose:
             self.model_.summary(expand_nested=True, show_trainable=True)
 
-        # prepare the optimization solver
-        if self.solver == 'adam':
+        # prepare the optimization optimizer
+        if self.optimizer == 'Adam':
             self._optimizer = Adam(learning_rate=self.learning_rate,
                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
                                    weight_decay=self.weight_decay)
+        elif self.optimizer == 'AdamW':
+            self._optimizer = AdamW(learning_rate=self.learning_rate,
+                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
+                                    weight_decay=self.weight_decay)
         else:
             raise NotImplementedError
 
@@ -881,49 +851,55 @@ class OrdinalCNN2DEffB5(OrdinalCNN2DBase):
             loss_ = 'mae'
         elif self.loss == 'reg_mse':
             loss_ = 'mse'
-        elif self.loss == 'nom_cross_entropy':
+        elif self.loss == 'nom_ce':
             loss_ = CategoricalCrossentropy(from_logits=self.to_logits)
         elif self.loss == 'nom_focal':
             loss_ = focal_loss(n_classes=self.n_classes,
                                from_logits=self.to_logits,
-                               gamma=self.focal_gamma,
+                               gamma=self.gamma,
                                class_weight=self.class_weight_)
-        elif self.loss == 'or_cross_entropy':
-            loss_ = or_cross_entropy_loss(n_classes=self.n_classes,
-                                          from_logits=self.to_logits,
-                                          regul_type=self.regul_type,
-                                          regul_eta=self.regul_eta,
-                                          regul_delta=self.regul_delta,
-                                          class_weight=self.class_weight_)
-        elif self.loss == 'or_focal':
-            loss_ = or_focal_loss(n_classes=self.n_classes,
+        elif self.loss == 'ur_ce':
+            loss_ = ur_ce_loss(n_classes=self.n_classes,
+                               from_logits=self.to_logits,
+                               ur_type=self.ur_type,
+                               ur_eta=self.ur_eta,
+                               ur_delta=self.ur_delta,
+                               class_weight=self.class_weight_)
+        elif self.loss == 'ur_focal':
+            loss_ = ur_focal_loss(n_classes=self.n_classes,
                                   from_logits=self.to_logits,
-                                  regul_type=self.regul_type,
-                                  regul_eta=self.regul_eta,
-                                  regul_delta=self.regul_delta,
-                                  focal_gamma=self.focal_gamma,
+                                  ur_type=self.ur_type,
+                                  ur_eta=self.ur_eta,
+                                  ur_delta=self.ur_delta,
+                                  gamma=self.gamma,
                                   class_weight=self.class_weight_)
         elif self.loss == 'owk':
+            self.owk_weight_ = compute_owk_weight(n_classes=self.n_classes,
+                                                  penalty=self.owk_penalty)
             loss_ = owk_loss(n_classes=self.n_classes,
                              from_logits=self.to_logits,
-                             weights=self.kappa_weights,
+                             owk_weight=self.owk_weight_,
                              class_priors=self.class_priors_,
                              class_weight=self.class_weight_)
-        elif self.loss == 'obd_cross_entropy':
-            loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
-                                           from_logits=self.to_logits,
-                                           obd_weight=self.obd_weight,
-                                           class_counts=self.class_counts_,
-                                           class_weight=self.class_weight_)
+        elif self.loss == 'obd_ce':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
+            loss_ = obd_ce_loss(n_classes=self.n_classes,
+                                from_logits=self.to_logits,
+                                obd_weight=self.obd_weight_,
+                                class_weight=self.class_weight_)
         elif self.loss == 'obd_focal':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
             loss_ = obd_focal_loss(n_classes=self.n_classes,
                                    from_logits=self.to_logits,
-                                   obd_weight=self.obd_weight,
-                                   class_counts=self.class_counts_,
-                                   focal_gamma=self.focal_gamma,
+                                   gamma=self.gamma,
+                                   obd_weight=self.obd_weight_,
                                    class_weight=self.class_weight_)
         else:
             raise ValueError
         self.loss_ = loss_
 
         self.model_.compile(optimizer=self._optimizer, loss=self.loss_)
+
+        return

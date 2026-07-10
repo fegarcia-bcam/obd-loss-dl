@@ -1,4 +1,4 @@
-# Authors:  Fernando García-García <fegarcia@bcamath.org>
+# Author: Fernando García-García <fegarcia@bcamath.org>
 
 import sys
 
@@ -6,7 +6,7 @@ from numbers import Integral, Real
 
 import numpy as np
 
-from sklearn.base import ClassifierMixin, BaseEstimator
+from sklearn.base import ClassifierMixin, BaseEstimator, _fit_context
 from sklearn.utils import check_random_state
 from sklearn.utils._param_validation import Interval, Options, StrOptions, InvalidParameterError
 from sklearn.utils.validation import check_is_fitted
@@ -18,39 +18,40 @@ from tensorflow.keras.layers import Conv2D, Conv2DTranspose
 
 from tensorflow.keras.initializers import GlorotUniform, Constant
 
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers import Adam, AdamW
 from tensorflow.keras.callbacks import EarlyStopping
 
 from tensorflow.keras.losses import CategoricalCrossentropy
 
-from tensorflow.keras.applications import EfficientNetB5
+from tensorflow.keras.applications import EfficientNetB0, EfficientNetB5
 
-from .tf_utils_crop import CropCenter2D
-from .tf_utils_resize import Resize2D
+from src.ordclass.TFCrop import CropCenter2D
+from src.ordclass.TFResize import Resize2D
 
-from .ordinal_layers_tf import RegressionOutput, NominalOutput
+from src.ordclass.OrdinalLayer import Regression, Nominal
 
+from src.ordclass.nominal_losses import focal_loss
 
-from .nominal_losses_tf import focal_loss
+from src.ordclass.ordinal_losses import ur_ce_loss, ur_focal_loss
+from src.ordclass.ordinal_losses import owk_loss
+from src.ordclass.ordinal_losses import obd_ce_loss, obd_focal_loss
 
-from .ordinal_losses_tf import or_cross_entropy_loss
-from .ordinal_losses_tf import or_focal_loss
-from .ordinal_losses_tf import owk_loss
-from .ordinal_losses_tf import obd_cross_entropy_loss
-from .ordinal_losses_tf import obd_focal_loss
-
+from src.ordclass.OWK import compute_owk_weight
+from src.ordclass.OBD import compute_obd_weight
 
 _MIN_CLASSES = 3
 _MAX_CLASSES = 2 ** 8
 
-ORDINAL_OUTPUT_TYPES = ['regression', 'nominal']
-ORDINAL_LOSSES_UNET = ['reg_mae', 'reg_mse',
-                       'nom_cross_entropy', 'nom_focal',
-                       'or_cross_entropy', 'or_focal',
-                       'owk',
-                       'obd_cross_entropy', 'obd_focal']
+ORDINAL_OUTPUT_TYPES = ['regress', 'nominal']
+ORDINAL_LOSSES_OUNET = ['reg_mae', 'reg_mse',
+                        'nom_ce', 'nom_focal',
+                        'ur_ce', 'ur_focal',
+                        'owk',
+                        'obd_ce', 'obd_focal']
 
+_N_DIMS_BATCH_1D = 3  # batch, length, channels
 _N_DIMS_BATCH_2D = 4  # batch, height, width, channels
+_N_DIMS_BATCH_3D = 5  # batch, height, width, depth, channels
 
 
 class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
@@ -58,59 +59,58 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
     def __init__(
             self,
             n_classes,
+            *,
             out_type='nominal',
             to_logits=True,
-            loss='or_cross_entropy',
-            regul_type=None,
-            regul_eta=0.0,
-            regul_delta=1.0,
-            kappa_weights='quadratic',
-            focal_gamma=2.0,
-            obd_weight='balanced',
-            class_counts=None,
-            class_priors=None,
+            loss='ur_ce',
+            gamma=2.0,
+            ur_type=None,
+            ur_eta=0.0,
+            ur_delta=1.0,
+            owk_penalty='quadratic',
+            obd_w_method='diff_entropy',
             class_weight='balanced',
-
             dropout=0.1,
             adapt='crop',
-            
             kernel_size=3,
             stride_conv=1,
             padding='valid',
             activation='swish',
             pool_size=2,
             stride_pool=2,
-
             epochs=100,
-            batch_size=16,
-            solver='adam',
-            learning_rate=0.001,
+            batch_size=64,
+            optimizer='AdamW',
+            learning_rate=1.0e-3,
             patience=10,
             min_delta=0.0,
             beta_1=0.900,
             beta_2=0.999,
             epsilon=1.0e-07,
-            weight_decay=None,
-
+            weight_decay=4.0e-3,
             verbose='auto',
             random_state=None
     ):
         self.n_classes = n_classes
         self.out_type = out_type
         self.to_logits = to_logits
+
         self.loss = loss
-        if (self.out_type == 'regression') and (self.loss not in ['reg_mae', 'reg_mse']):
+        if (self.out_type == 'regress') and (self.loss not in ['reg_mae', 'reg_mse']):
             raise InvalidParameterError
-        if (self.out_type != 'regression') and (self.loss in ['reg_mae', 'reg_mse']):
+        if (self.out_type != 'regress') and (self.loss in ['reg_mae', 'reg_mse']):
             raise InvalidParameterError
-        self.regul_type = regul_type
-        self.regul_eta = regul_eta
-        self.regul_delta = regul_delta
-        self.kappa_weights = kappa_weights
-        self.focal_gamma = focal_gamma
-        self.obd_weight = obd_weight
-        self.class_counts = class_counts
-        self.class_priors = class_priors
+
+        self.gamma = gamma
+
+        self.ur_type = ur_type
+        self.ur_eta = ur_eta
+        self.ur_delta = ur_delta
+
+        self.owk_penalty = owk_penalty
+
+        self.obd_w_method = obd_w_method
+
         self.class_weight = class_weight
 
         self.dropout = dropout
@@ -125,7 +125,7 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
 
         self.epochs = epochs
         self.batch_size = batch_size
-        self.solver = solver
+        self.optimizer = optimizer
         self.learning_rate = learning_rate
         self.patience = patience
         self.min_delta = min_delta
@@ -137,56 +137,51 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
         self.verbose = verbose
         self.random_state = random_state
 
-    def _build(self):
+        self._random_state = check_random_state(self.random_state)
+
         self.model_ = None
+
+    def _build(self):
         raise NotImplementedError
 
     def _get_class_counts(self, X, ohe=True):
-        class_counts = np.zeros(shape=(self.n_classes,), dtype=np.uint64)
+        class_counts = [0] * self.n_classes
         for _, mask in X:
             if ohe:
                 mask = tf.math.argmax(mask, axis=-1)  # revert one-hot encoding
-            else:
-                mask = tf.squeeze(mask, axis=-1)
+            mask = tf.squeeze(mask)
+            mask = tf.reshape(mask, shape=[-1])  # flatten
 
-            for c in range(self.n_classes):
-                class_equal = tf.equal(mask, c)
-                class_equal = tf.cast(class_equal, dtype=tf.uint64)
-                class_counts[c] += tf.math.reduce_sum(class_equal, axis=None).numpy()
+            # count everything in the batch at once
+            cl_idx, _, cl_counts = tf.unique_with_counts(mask)
+            for c_, counts_ in zip(cl_idx.numpy(), cl_counts.numpy()):
+                class_counts[int(c_)] += int(counts_)
 
         return class_counts
-
-    def _get_class_priors(self, X, ohe=True):
-        class_counts =  self._get_class_counts(X, ohe=ohe)
-        class_priors = class_counts / np.sum(class_counts)
-        class_priors = class_priors.astype(np.float32)
-        return class_priors
 
     def _fit(self, X):
         # check parameters
         self._validate_params()
 
-        # compute class counts, priors and weights, if necessary
-        if self.class_counts is not None:
-            self.class_counts_ = self.class_counts
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_counts_ = self._get_class_counts(X, ohe=ohe)
+        # compute class counts, priors and weights
+        ohe_ = (self.out_type != 'regress')
+        self.class_counts_ = self._get_class_counts(X, ohe=ohe_)
+        if self.verbose:
+            print('Class counts: {}'.format(self.class_counts_), flush=True)
 
-        if self.class_priors is not None:
-            self.class_priors_ = self.class_priors
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_priors_ = self._get_class_priors(X, ohe=ohe)
+        class_priors_ = self.class_counts_ / np.sum(self.class_counts_)
+        self.class_priors_ = class_priors_.astype(np.float32)
+        if self.verbose:
+            print('Class priors: {}'.format(self.class_priors_), flush=True)
 
         if self.class_weight is None:
             self.class_weight_ = np.ones(shape=(self.n_classes,), dtype=np.float32)
         elif isinstance(self.class_weight, str) and (self.class_weight == 'balanced'):
             self.class_weight_ = 1.0 / (self.class_priors_ * self.n_classes)
-        elif not isinstance(self.class_weight, np.ndarray) or np.any(self.class_weight < 0.0):
-            raise ValueError
         else:
             self.class_weight_ = self.class_weight
+        if self.verbose:
+            print('Class weights: {}'.format(self.class_weight_), flush=True)
 
         # early stopping
         callback_early_stop = EarlyStopping(monitor='loss', mode='min',
@@ -194,15 +189,18 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
                                             restore_best_weights=True)
 
         # build the UNet model
-        self._build()
+        if self.model_ is None:
+            self._build()
 
         # run the training
         self.history_ = self.model_.fit(x=X, y=None,
                                         epochs=self.epochs,
                                         callbacks=[callback_early_stop],
                                         verbose=self.verbose)
+        self._is_fitted = True
         return self
 
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X, y):
         return self._fit(X)
 
@@ -210,27 +208,25 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
         # check parameters
         self._validate_params()
 
-        # compute class counts, priors and weights, if necessary
-        if self.class_counts is not None:
-            self.class_counts_ = self.class_counts
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_counts_ = self._get_class_counts(X, ohe=ohe)
+        # compute class counts, priors and weights
+        ohe_ = (self.out_type != 'regress')
+        self.class_counts_ = self._get_class_counts(X, ohe=ohe_)
+        if self.verbose:
+            print('Class counts: {}'.format(self.class_counts_), flush=True)
 
-        if self.class_priors is not None:
-            self.class_priors_ = self.class_priors
-        else:
-            ohe = (self.out_type != 'regression')
-            self.class_priors_ = self._get_class_priors(X, ohe=ohe)
+        class_priors_ = self.class_counts_ / np.sum(self.class_counts_)
+        self.class_priors_ = class_priors_.astype(np.float32)
+        if self.verbose:
+            print('Class priors: {}'.format(self.class_priors_), flush=True)
 
         if self.class_weight is None:
             self.class_weight_ = np.ones(shape=(self.n_classes,), dtype=np.float32)
         elif isinstance(self.class_weight, str) and (self.class_weight == 'balanced'):
             self.class_weight_ = 1.0 / (self.class_priors_ * self.n_classes)
-        elif not isinstance(self.class_weight, np.ndarray) or np.any(self.class_weight < 0.0):
-            raise ValueError
         else:
             self.class_weight_ = self.class_weight
+        if self.verbose:
+            print('Class weights: {}'.format(self.class_weight_), flush=True)
 
         # early stopping
         callback_early_stop = EarlyStopping(monitor='val_loss', mode='min',
@@ -238,7 +234,8 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
                                             restore_best_weights=True)
 
         # build the CNN model
-        self._build()
+        if self.model_ is None:
+            self._build()
 
         # run the training
         self.history_ = self.model_.fit(x=X,
@@ -246,13 +243,15 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
                                         epochs=self.epochs,
                                         callbacks=[callback_early_stop],
                                         verbose=self.verbose)
+        self._is_fitted = True
         return self
 
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit_valid(self, X, X_val):
         return self._fit_valid(X, X_val)
 
     def _predict(self, X):
-        if self.out_type == 'regression':
+        if self.out_type == 'regress':
             y_pred = self.model_(X)
             y_pred = tf.round(y_pred)
             y_pred = tf.clip_by_value(y_pred, 0, self.n_classes - 1)
@@ -265,7 +264,7 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
         return y_pred
     
     def _predict_proba(self, X):
-        if self.out_type == 'regression':
+        if self.out_type == 'regress':
             raise NotImplementedError
 
         proba_pred = self.model_(X)
@@ -321,7 +320,7 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
 
         scores = []
         for X_, y_ in X:
-            if self.out_type == 'regression':
+            if self.out_type == 'regress':
                 y_true_ = tf.squeeze(y_, axis=-1)
             else:
                 y_true_ = tf.math.argmax(y_, axis=-1)  # revert one-hot encoding
@@ -346,39 +345,32 @@ class OrdinalUNetBase(ClassifierMixin, BaseEstimator):
         score = np.mean(scores)
         return score
 
+    def __sklearn_is_fitted__(self):
+        return hasattr(self, '_is_fitted') and self._is_fitted
+
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
         tags.non_deterministic = True
         return tags
 
 
-class OrdinalUNet2DEffB5(OrdinalUNetBase):
-    _N_BLOCKS_EFFB5 = 7
-    _PREPROC_LAYERS_EFFB5 = ['input', 'rescaling', 'normalization', 'stem']
-    _BLOCK_NAME_EFFB5 = 'block{}'
-    _N_FILTERS_EFFB5 = [None, 24, 40, 64, 176, 512]
+class OrdinalUNet2DEffB0(OrdinalUNetBase):
+
+    _N_BLOCKS_EFFB0 = 7
+    _PREPROC_LAYERS_EFFB0 = ['input', 'rescaling', 'normalization', 'stem']
+    _BLOCK_NAME_EFFB0 = 'block{}'
+    _N_FILTERS_EFFB0 = [None, 16, 24, 40, 112, 320]
 
     _parameter_constraints: dict = {
         'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')],
         'out_type': [StrOptions({*ORDINAL_OUTPUT_TYPES})],
         'to_logits': ['boolean'],
-        'loss': [StrOptions({*ORDINAL_LOSSES_UNET})],
-        'regul_type': [StrOptions({'beta'}), None],
-        'regul_eta': [Interval(Real, 0.0, 1.0, closed='both'), None],
-        'regul_delta': [Interval(Real, 0.0, None, closed='neither'), None],
-        'kappa_weights': [StrOptions({'nominal', 'linear', 'quadratic'}), 'array-like'],
-        'focal_gamma': [Interval(Real, 0.0, None, closed='left')],
-        'obd_weight': [StrOptions({'balanced'}), dict, None],
-        'class_counts': ['array-like', None],
-        'class_priors': ['array-like', None],
+        'loss': [StrOptions({*ORDINAL_LOSSES_OUNET})],
         'class_weight': [StrOptions({'balanced'}), 'array-like', None],
-
         'weights': [StrOptions({'imagenet'}), None],
-        'freeze_blocks': [Interval(Integral, 0, _N_BLOCKS_EFFB5, closed='both'), StrOptions({'none', 'all'})],
-
+        'freeze_blocks': [Interval(Integral, 0, _N_BLOCKS_EFFB0, closed='both'), StrOptions({'none', 'all'})],
         'dropout': [Interval(Real, 0.0, 1.0, closed='both'), None],
         'adapt': [StrOptions({'crop', 'resize'})],
-
         'epochs': [Interval(Integral, 1, None, closed='left')],
         'batch_size': [Interval(Integral, 1, None, closed='left')],
         'learning_rate': [Interval(Real, 0.0, None, closed='neither')],
@@ -387,7 +379,6 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
         'beta_1': [Interval(Real, 0.0, 1.0, closed='left')],
         'beta_2': [Interval(Real, 0.0, 1.0, closed='left')],
         'epsilon': [Interval(Real, 0.0, None, closed='neither')],
-
         'verbose': [Interval(Integral, 0, 2, closed='both'), StrOptions({'auto'})],
         'random_state': ['random_state']
     }
@@ -395,47 +386,40 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
     def __init__(
             self,
             n_classes,
+            *,
             out_type='nominal',
             to_logits=True,
-            loss='or_cross_entropy',
-            regul_type=None,
-            regul_eta=0.0,
-            regul_delta=1.0,
-            kappa_weights='quadratic',
-            focal_gamma=2.0,
-            obd_weight='balanced',
-            class_counts=None,
-            class_priors=None,
+            loss='ur_ce',
+            gamma=2.0,
+            ur_type=None,
+            ur_eta=0.0,
+            ur_delta=1.0,
+            owk_penalty='quadratic',
+            obd_w_method='diff_entropy',
             class_weight='balanced',
-
-            input_height=456,
-            input_width=456,
+            input_height=224,
+            input_width=224,
             input_channels=3,
-
             weights='imagenet',
             freeze_blocks='none',
-
             dropout=0.1,
             adapt='crop',
-
             kernel_size=3,
             stride_conv=1,
             padding='valid',
             activation='swish',
             pool_size=2,
             stride_pool=2,
-
             epochs=100,
-            batch_size=16,
-            solver='adam',
-            learning_rate=0.001,
+            batch_size=64,
+            optimizer='AdamW',
+            learning_rate=1.0e-3,
             patience=10,
             min_delta=0.0,
             beta_1=0.900,
             beta_2=0.999,
             epsilon=1.0e-07,
-            weight_decay=None,
-
+            weight_decay=4.0e-3,
             verbose='auto',
             random_state=None
     ):
@@ -444,29 +428,24 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
             out_type=out_type,
             to_logits=to_logits,
             loss=loss,
-            regul_type=regul_type,
-            regul_eta=regul_eta,
-            regul_delta=regul_delta,
-            kappa_weights=kappa_weights,
-            focal_gamma=focal_gamma,
-            obd_weight=obd_weight,
-            class_counts=class_counts,
-            class_priors=class_priors,
+            gamma=gamma,
+            ur_type=ur_type,
+            ur_eta=ur_eta,
+            ur_delta=ur_delta,
+            owk_penalty=owk_penalty,
+            obd_w_method=obd_w_method,
             class_weight=class_weight,
-
             dropout=dropout,
             adapt=adapt,
-
             kernel_size=kernel_size,
             stride_conv=stride_conv,
             padding=padding,
             activation=activation,
             pool_size=pool_size,
             stride_pool=stride_pool,
-
             epochs=epochs,
             batch_size=batch_size,
-            solver=solver,
+            optimizer=optimizer,
             learning_rate=learning_rate,
             patience=patience,
             min_delta=min_delta,
@@ -474,7 +453,6 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
             beta_2=beta_2,
             epsilon=epsilon,
             weight_decay=weight_decay,
-
             verbose=verbose,
             random_state=random_state
         )
@@ -614,27 +592,451 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
             seed_out = self._random_state.randint(sys.maxsize)
             kernel_init_out = GlorotUniform(seed=seed_out)  # initialization as in Glorot et al.
 
-            if self.out_type == 'regression':
+            if self.out_type == 'regress':
                 # initial guess for bias
                 idx_classes = np.arange(self.n_classes)
                 bias_init_out = np.dot(idx_classes, self.class_priors_)
                 bias_init_out = Constant(bias_init_out)
 
-                layer_ord_out = RegressionOutput(n_classes=self.n_classes,
-                                                 kernel_initializer=kernel_init_out,
-                                                 bias_initializer=bias_init_out,
-                                                 name='output')
+                layer_ord_out = Regression(n_classes=self.n_classes,
+                                           kernel_initializer=kernel_init_out,
+                                           bias_initializer=bias_init_out,
+                                           name='output')
 
             elif self.out_type == 'nominal':
                 # initial guess for bias
                 bias_init_out = np.log(self.class_priors_)
                 bias_init_out = Constant(bias_init_out)
 
-                layer_ord_out = NominalOutput(n_classes=self.n_classes,
-                                              to_logits=self.to_logits,
-                                              kernel_initializer=kernel_init_out,
-                                              bias_initializer=bias_init_out,
-                                              name='output')
+                layer_ord_out = Nominal(n_classes=self.n_classes,
+                                        to_logits=self.to_logits,
+                                        kernel_initializer=kernel_init_out,
+                                        bias_initializer=bias_init_out,
+                                        name='output')
+
+            else:
+                raise ValueError
+            x = layer_ord_out(x)
+
+        return x
+
+    def _contractive_path(self, x):
+        # backbone EfficientNetB0 without top dense layers, and even without pooling
+        model_backbone = EfficientNetB0(input_tensor=x,  # plug the input here
+                                        weights=self.weights,
+                                        pooling=None,
+                                        include_top=False)
+
+        # freeze blocks
+        if (self.freeze_blocks == 0) or (self.freeze_blocks == 'none'):  # do not freeze any layers
+            model_backbone.trainable = True
+
+        elif (self.freeze_blocks == OrdinalUNet2DEffB0._N_BLOCKS_EFFB0) or (self.freeze_blocks == 'all'):  # freeze all
+            model_backbone.trainable = False
+
+        else:  # freeze some blocks
+            for layer in model_backbone.layers:
+                freeze_layer = False
+                for preproc_name in OrdinalUNet2DEffB0._PREPROC_LAYERS_EFFB0:
+                    if layer.name.startswith(preproc_name):
+                        freeze_layer = True
+                        break
+
+                if not freeze_layer:
+                    if isinstance(self.freeze_blocks, int):  # should always be the case here
+                        for idx_block in range(self.freeze_blocks):
+                            block_name = OrdinalUNet2DEffB0._BLOCK_NAME_EFFB0.format(idx_block + 1)
+                            if layer.name.startswith(block_name):
+                                freeze_layer = True
+                                break
+
+                layer.trainable = not freeze_layer
+
+        # set backbone architecture
+        x = model_backbone.get_layer('top_conv').input  # discards EfficientNetB0 top convolutional layers
+
+        # add skip connections manually
+        l_skip_connects = []
+
+        # skip_stem = model_backbone.get_layer('stem_conv_pad').input
+        # l_skip_connects.append(skip_stem)
+        l_skip_connects.append(None)  # do not connect input without pre-processing
+
+        skip_block1 = model_backbone.get_layer('block1a_project_bn').output
+        l_skip_connects.append(skip_block1)
+
+        skip_block2 = model_backbone.get_layer('block2b_add').output
+        l_skip_connects.append(skip_block2)
+
+        skip_block3 = model_backbone.get_layer('block3b_add').output
+        l_skip_connects.append(skip_block3)
+
+        skip_block5 = model_backbone.get_layer('block5c_add').output
+        l_skip_connects.append(skip_block5)
+
+        return x, l_skip_connects
+
+    def _expansive_path(self, x, l_skip_connects):
+        n_blocks_expand = len(l_skip_connects)
+
+        for idx_e in range(n_blocks_expand):
+            is_last = (idx_e == n_blocks_expand - 1)
+            skip_connect = l_skip_connects[-(idx_e + 1)]
+
+            n_filts = OrdinalUNet2DEffB0._N_FILTERS_EFFB0[-(idx_e + 2)]
+            if n_filts is None:
+                n_filts = self.n_classes
+            x = self._upsample_2d(x, n_filts, skip_connect, is_last, idx_e)
+
+        return x
+
+    def _build(self):
+        # input layer
+        shape_in = (self.input_height, self.input_width, self.input_channels)
+        x_in = Input(shape=shape_in, name='input_unet')
+
+        # contracting path
+        x_, l_skip_connects = self._contractive_path(x_in)
+
+        # expansive path
+        x_out = self._expansive_path(x_, l_skip_connects)
+
+        # full model
+        self.model_ = Model(x_in, x_out,
+                            name='OrdinalUNet2DEffB0')
+        if self.verbose:
+            self.model_.summary(expand_nested=True, show_trainable=True)
+
+        # prepare the optimization optimizer
+        if self.optimizer == 'Adam':
+            self._optimizer = Adam(learning_rate=self.learning_rate,
+                                   beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
+                                   weight_decay=self.weight_decay)
+        elif self.optimizer == 'AdamW':
+            self._optimizer = AdamW(learning_rate=self.learning_rate,
+                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
+                                    weight_decay=self.weight_decay)
+        else:
+            raise NotImplementedError
+
+        # prepare the loss function
+        if self.loss == 'reg_mae':
+            loss_ = 'mae'
+        elif self.loss == 'reg_mse':
+            loss_ = 'mse'
+        elif self.loss == 'nom_ce':
+            loss_ = CategoricalCrossentropy(from_logits=self.to_logits)
+        elif self.loss == 'nom_focal':
+            loss_ = focal_loss(n_classes=self.n_classes,
+                               from_logits=self.to_logits,
+                               gamma=self.gamma,
+                               class_weight=self.class_weight_)
+        elif self.loss == 'ur_ce':
+            loss_ = ur_ce_loss(n_classes=self.n_classes,
+                                          from_logits=self.to_logits,
+                                          ur_type=self.ur_type,
+                                          ur_eta=self.ur_eta,
+                                          ur_delta=self.ur_delta,
+                                          class_weight=self.class_weight_)
+        elif self.loss == 'ur_focal':
+            loss_ = ur_focal_loss(n_classes=self.n_classes,
+                                  from_logits=self.to_logits,
+                                  ur_type=self.ur_type,
+                                  ur_eta=self.ur_eta,
+                                  ur_delta=self.ur_delta,
+                                  gamma=self.gamma,
+                                  class_weight=self.class_weight_)
+        elif self.loss == 'owk':
+            self.owk_weight_ = compute_owk_weight(n_classes=self.n_classes,
+                                                  penalty=self.owk_penalty)
+            loss_ = owk_loss(n_classes=self.n_classes,
+                             from_logits=self.to_logits,
+                             owk_weight=self.owk_weight_,
+                             class_priors=self.class_priors_,
+                             class_weight=self.class_weight_)
+        elif self.loss == 'obd_ce':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
+            loss_ = obd_ce_loss(n_classes=self.n_classes,
+                                from_logits=self.to_logits,
+                                obd_weight=self.obd_weight_,
+                                class_weight=self.class_weight_)
+        elif self.loss == 'obd_focal':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
+            loss_ = obd_focal_loss(n_classes=self.n_classes,
+                                   from_logits=self.to_logits,
+                                   gamma=self.gamma,
+                                   obd_weight=self.obd_weight_,
+                                   class_weight=self.class_weight_)
+        else:
+            raise ValueError
+        self.loss_ = loss_
+
+        self.model_.compile(optimizer=self._optimizer, loss=self.loss_)
+
+        return
+
+
+class OrdinalUNet2DEffB5(OrdinalUNetBase):
+
+    _N_BLOCKS_EFFB5 = 7
+    _PREPROC_LAYERS_EFFB5 = ['input', 'rescaling', 'normalization', 'stem']
+    _BLOCK_NAME_EFFB5 = 'block{}'
+    _N_FILTERS_EFFB5 = [None, 24, 40, 64, 176, 512]
+
+    _parameter_constraints: dict = {
+        'n_classes': [Interval(Integral, _MIN_CLASSES, _MAX_CLASSES, closed='both')],
+        'out_type': [StrOptions({*ORDINAL_OUTPUT_TYPES})],
+        'to_logits': ['boolean'],
+        'loss': [StrOptions({*ORDINAL_LOSSES_OUNET})],
+        'class_weight': [StrOptions({'balanced'}), 'array-like', None],
+        'weights': [StrOptions({'imagenet'}), None],
+        'freeze_blocks': [Interval(Integral, 0, _N_BLOCKS_EFFB5, closed='both'), StrOptions({'none', 'all'})],
+        'dropout': [Interval(Real, 0.0, 1.0, closed='both'), None],
+        'adapt': [StrOptions({'crop', 'resize'})],
+        'epochs': [Interval(Integral, 1, None, closed='left')],
+        'batch_size': [Interval(Integral, 1, None, closed='left')],
+        'learning_rate': [Interval(Real, 0.0, None, closed='neither')],
+        'patience': [Interval(Integral, 1, None, closed='left'), Options(Real, {np.inf})],
+        'min_delta': [Interval(Real, 0.0, None, closed='left')],
+        'beta_1': [Interval(Real, 0.0, 1.0, closed='left')],
+        'beta_2': [Interval(Real, 0.0, 1.0, closed='left')],
+        'epsilon': [Interval(Real, 0.0, None, closed='neither')],
+        'verbose': [Interval(Integral, 0, 2, closed='both'), StrOptions({'auto'})],
+        'random_state': ['random_state']
+    }
+
+    def __init__(
+            self,
+            n_classes,
+            *,
+            out_type='nominal',
+            to_logits=True,
+            loss='ur_ce',
+            gamma=2.0,
+            ur_type=None,
+            ur_eta=0.0,
+            ur_delta=1.0,
+            owk_penalty='quadratic',
+            obd_w_method='diff_entropy',
+            class_weight='balanced',
+            input_height=456,
+            input_width=456,
+            input_channels=3,
+            weights='imagenet',
+            freeze_blocks='none',
+            dropout=0.1,
+            adapt='crop',
+            kernel_size=3,
+            stride_conv=1,
+            padding='valid',
+            activation='swish',
+            pool_size=2,
+            stride_pool=2,
+            epochs=100,
+            batch_size=64,
+            optimizer='AdamW',
+            learning_rate=1.0e-3,
+            patience=10,
+            min_delta=0.0,
+            beta_1=0.900,
+            beta_2=0.999,
+            epsilon=1.0e-07,
+            weight_decay=4.0e-3,
+            verbose='auto',
+            random_state=None
+    ):
+        super().__init__(
+            n_classes=n_classes,
+            out_type=out_type,
+            to_logits=to_logits,
+            loss=loss,
+            gamma=gamma,
+            ur_type=ur_type,
+            ur_eta=ur_eta,
+            ur_delta=ur_delta,
+            owk_penalty=owk_penalty,
+            obd_w_method=obd_w_method,
+            class_weight=class_weight,
+            dropout=dropout,
+            adapt=adapt,
+            kernel_size=kernel_size,
+            stride_conv=stride_conv,
+            padding=padding,
+            activation=activation,
+            pool_size=pool_size,
+            stride_pool=stride_pool,
+            epochs=epochs,
+            batch_size=batch_size,
+            optimizer=optimizer,
+            learning_rate=learning_rate,
+            patience=patience,
+            min_delta=min_delta,
+            beta_1=beta_1,
+            beta_2=beta_2,
+            epsilon=epsilon,
+            weight_decay=weight_decay,
+            verbose=verbose,
+            random_state=random_state
+        )
+
+        self.input_height = input_height
+        self.input_width = input_width
+        self.input_channels = input_channels
+
+        self.weights = weights
+        self.freeze_blocks = freeze_blocks
+
+        self._validate_params()
+        self._random_state = check_random_state(self.random_state)
+
+    def _upsample_2d(self, x, n_filts, skip_connect, is_last, idx):
+        # upsample
+        seed_conv_tr = self._random_state.randint(sys.maxsize)
+        kernel_init_tr = GlorotUniform(seed=seed_conv_tr)  # initialization as in Glorot et al.
+
+        layer_conv2dtr = Conv2DTranspose(filters=n_filts,
+                                         kernel_size=self.pool_size,
+                                         strides=self.stride_pool,
+                                         padding=self.padding,
+                                         activation=None,
+                                         use_bias=True,
+                                         kernel_initializer=kernel_init_tr,
+                                         bias_initializer='zeros',
+                                         name=f"up_conv2dtr_{idx}")
+        x = layer_conv2dtr(x)
+
+        # perform batch normalization, dropout and activation
+        layer_batchnorm = BatchNormalization(name=f"up_batchnorm_{idx}")
+        x = layer_batchnorm(x)
+
+        if self.dropout > 0.0:
+            seed_drop = self._random_state.randint(sys.maxsize)
+            layer_drop = Dropout(rate=self.dropout,
+                                 seed=seed_drop,
+                                 name=f"up_dropout_{idx}")
+            x = layer_drop(x)
+
+        layer_activation = Activation(activation=self.activation,
+                                      name=f"up_activation_{idx}")
+        x = layer_activation(x)
+
+        # adapt the skipped connection size
+        if skip_connect is None:
+            x_concat = x
+        else:
+            is_batched = (len(x.shape) == _N_DIMS_BATCH_2D)
+            img_format = tf.keras.backend.image_data_format()
+            if is_batched:
+                if img_format == 'channels_last':
+                    dim_h, dim_w = 1, 2
+                else:  # 'channels_first'
+                    dim_h, dim_w = 2, 3
+            else:
+                if img_format == 'channels_last':
+                    dim_h, dim_w = 0, 1
+                else:  # 'channels_first'
+                    dim_h, dim_w = 1, 2
+            x_h, x_w = x.shape[dim_h], x.shape[dim_w]
+
+            sk_h, sk_w = skip_connect.shape[dim_h], skip_connect.shape[dim_w]
+            if (sk_h != x_h) or (sk_w != x_w):
+                if self.adapt == 'crop':
+                    layer_adapt = CropCenter2D(height=x_h, width=x_w,
+                                               name=f"up_crop2d_{idx}")
+                elif self.adapt == 'resize':
+                    layer_adapt = Resize2D(height=x_h, width=x_w,
+                                           name=f"up_resize2d_{idx}")
+                else:
+                    raise ValueError
+                skip_adapted = layer_adapt(skip_connect)
+            else:
+                skip_adapted = skip_connect
+
+            # concatenate the skipped connection (adapted size) with x
+            layer_concat = Concatenate(axis=-1,
+                                       name=f"up_concat_{idx}")
+            x_concat = layer_concat([skip_adapted, x])
+
+        # first convolutional segment
+        seed_conv_a = self._random_state.randint(sys.maxsize)
+        kernel_init_a = GlorotUniform(seed=seed_conv_a)  # initialization as in Glorot et al.
+
+        layer_conv2d_a = Conv2D(filters=n_filts,
+                                kernel_size=self.kernel_size,
+                                strides=self.stride_conv,
+                                padding=self.padding,
+                                activation=self.activation,
+                                use_bias=True,
+                                kernel_initializer=kernel_init_a,
+                                bias_initializer='zeros',
+                                name=f"up_conv2d_{idx}a")
+        x = layer_conv2d_a(x_concat)
+
+        # second convolutional segment
+        seed_conv_b = self._random_state.randint(sys.maxsize)
+        kernel_init_b = GlorotUniform(seed=seed_conv_b)  # initialization as in Glorot et al.
+
+        layer_conv2d_b = Conv2D(filters=n_filts,
+                                kernel_size=self.kernel_size,
+                                strides=self.stride_conv,
+                                padding=self.padding,
+                                activation=self.activation,
+                                use_bias=True,
+                                kernel_initializer=kernel_init_b,
+                                bias_initializer='zeros',
+                                name=f"up_conv2d_{idx}b")
+        x = layer_conv2d_b(x)
+
+        # prepare the output, if this is the last block
+        if is_last:
+            # determine the resulting dimensions
+            is_batched = (len(x.shape) == _N_DIMS_BATCH_2D)
+            img_format = tf.keras.backend.image_data_format()
+            if is_batched:
+                if img_format == 'channels_last':
+                    dim_h, dim_w = 1, 2
+                else:  # 'channels_first'
+                    dim_h, dim_w = 2, 3
+            else:
+                if img_format == 'channels_last':
+                    dim_h, dim_w = 0, 1
+                else:  # 'channels_first'
+                    dim_h, dim_w = 1, 2
+            x_h, x_w = x.shape[dim_h], x.shape[dim_w]
+
+            # if these dimensions don't match the input, then resize 2D
+            if (x_h != self.input_height) or (x_w != self.input_width):
+                layer_resize = Resize2D(height=self.input_height, width=self.input_width,
+                                        name='up_resize_final')
+                x = layer_resize(x)
+
+            # ordinal output
+            seed_out = self._random_state.randint(sys.maxsize)
+            kernel_init_out = GlorotUniform(seed=seed_out)  # initialization as in Glorot et al.
+
+            if self.out_type == 'regress':
+                # initial guess for bias
+                idx_classes = np.arange(self.n_classes)
+                bias_init_out = np.dot(idx_classes, self.class_priors_)
+                bias_init_out = Constant(bias_init_out)
+
+                layer_ord_out = Regression(n_classes=self.n_classes,
+                                           kernel_initializer=kernel_init_out,
+                                           bias_initializer=bias_init_out,
+                                           name='output')
+
+            elif self.out_type == 'nominal':
+                # initial guess for bias
+                bias_init_out = np.log(self.class_priors_)
+                bias_init_out = Constant(bias_init_out)
+
+                layer_ord_out = Nominal(n_classes=self.n_classes,
+                                        to_logits=self.to_logits,
+                                        kernel_initializer=kernel_init_out,
+                                        bias_initializer=bias_init_out,
+                                        name='output')
 
             else:
                 raise ValueError
@@ -729,11 +1131,15 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
         if self.verbose:
             self.model_.summary(expand_nested=True, show_trainable=True)
 
-        # prepare the optimization solver
-        if self.solver == 'adam':
+        # prepare the optimization optimizer
+        if self.optimizer == 'Adam':
             self._optimizer = Adam(learning_rate=self.learning_rate,
                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
                                    weight_decay=self.weight_decay)
+        elif self.optimizer == 'AdamW':
+            self._optimizer = AdamW(learning_rate=self.learning_rate,
+                                    beta_1=self.beta_1, beta_2=self.beta_2, epsilon=self.epsilon,
+                                    weight_decay=self.weight_decay)
         else:
             raise NotImplementedError
 
@@ -742,49 +1148,55 @@ class OrdinalUNet2DEffB5(OrdinalUNetBase):
             loss_ = 'mae'
         elif self.loss == 'reg_mse':
             loss_ = 'mse'
-        elif self.loss == 'nom_cross_entropy':
+        elif self.loss == 'nom_ce':
             loss_ = CategoricalCrossentropy(from_logits=self.to_logits)
         elif self.loss == 'nom_focal':
             loss_ = focal_loss(n_classes=self.n_classes,
                                from_logits=self.to_logits,
-                               gamma=self.focal_gamma,
+                               gamma=self.gamma,
                                class_weight=self.class_weight_)
-        elif self.loss == 'or_cross_entropy':
-            loss_ = or_cross_entropy_loss(n_classes=self.n_classes,
+        elif self.loss == 'ur_ce':
+            loss_ = ur_ce_loss(n_classes=self.n_classes,
                                           from_logits=self.to_logits,
-                                          regul_type=self.regul_type,
-                                          regul_eta=self.regul_eta,
-                                          regul_delta=self.regul_delta,
+                                          ur_type=self.ur_type,
+                                          ur_eta=self.ur_eta,
+                                          ur_delta=self.ur_delta,
                                           class_weight=self.class_weight_)
-        elif self.loss == 'or_focal':
-            loss_ = or_focal_loss(n_classes=self.n_classes,
+        elif self.loss == 'ur_focal':
+            loss_ = ur_focal_loss(n_classes=self.n_classes,
                                   from_logits=self.to_logits,
-                                  regul_type=self.regul_type,
-                                  regul_eta=self.regul_eta,
-                                  regul_delta=self.regul_delta,
-                                  focal_gamma=self.focal_gamma,
+                                  ur_type=self.ur_type,
+                                  ur_eta=self.ur_eta,
+                                  ur_delta=self.ur_delta,
+                                  gamma=self.gamma,
                                   class_weight=self.class_weight_)
         elif self.loss == 'owk':
+            self.owk_weight_ = compute_owk_weight(n_classes=self.n_classes,
+                                                  penalty=self.owk_penalty)
             loss_ = owk_loss(n_classes=self.n_classes,
                              from_logits=self.to_logits,
-                             weights=self.kappa_weights,
+                             owk_weight=self.owk_weight_,
                              class_priors=self.class_priors_,
                              class_weight=self.class_weight_)
-        elif self.loss == 'obd_cross_entropy':
-            loss_ = obd_cross_entropy_loss(n_classes=self.n_classes,
-                                           from_logits=self.to_logits,
-                                           obd_weight=self.obd_weight,
-                                           class_counts=self.class_counts_,
-                                           class_weight=self.class_weight_)
+        elif self.loss == 'obd_ce':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
+            loss_ = obd_ce_loss(n_classes=self.n_classes,
+                                from_logits=self.to_logits,
+                                obd_weight=self.obd_weight_,
+                                class_weight=self.class_weight_)
         elif self.loss == 'obd_focal':
+            self.obd_weight_ = compute_obd_weight(class_counts=self.class_counts_,
+                                                  method=self.obd_w_method)
             loss_ = obd_focal_loss(n_classes=self.n_classes,
                                    from_logits=self.to_logits,
-                                   obd_weight=self.obd_weight,
-                                   class_counts=self.class_counts_,
-                                   focal_gamma=self.focal_gamma,
+                                   gamma=self.gamma,
+                                   obd_weight=self.obd_weight_,
                                    class_weight=self.class_weight_)
         else:
             raise ValueError
         self.loss_ = loss_
 
         self.model_.compile(optimizer=self._optimizer, loss=self.loss_)
+
+        return
